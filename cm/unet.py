@@ -554,12 +554,19 @@ class UNetModel(nn.Module):
         use_scale_shift_norm=False,
         resblock_updown=False,
         use_new_attention_order=False,
+        predstep = 1,
+        prior_shakedrop     = False,        # If applying Prior ShakeDrop to the network.
+        phi                 = 0.25,          # Prior ShakeDrop probability.
+
     ):
         super().__init__()
 
         if num_heads_upsample == -1:
             num_heads_upsample = num_heads
 
+        self.prior_shakedrop = prior_shakedrop
+        self.phi = phi
+        self.predstep = predstep,
         self.image_size = image_size
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -723,6 +730,12 @@ class UNetModel(nn.Module):
             nn.SiLU(),
             zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
         )
+        self.generator_list = nn.ModuleList([])
+        for i in range(predstep-1):
+            self.generator_list.append(
+                MetaGenerator(in_channel=ch,out_channel=out_channels,dims=dims)
+            )
+
 
     def convert_to_fp16(self):
         """
@@ -740,7 +753,7 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps, y=None):
+    def forward(self, x, timesteps, y=None,return_features=False):
         """
         Apply the model to an input batch.
 
@@ -760,13 +773,43 @@ class UNetModel(nn.Module):
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
 
+        if self.prior_shakedrop:
+            phi = emb * (1- 2*self.phi) + self.phi
+            neg_phi = 2 * (1 - phi) # noise_label is 0, neg_phi is 1.4; noise_label is 1, neg_phi is 0.6
+            pos_phi = 2 * phi       # noise_label is 0, pos_phi is 0.6; noise_label is 1, pos_phi is 1.4
+            neg_phi = neg_phi.view(emb.shape[0],1,1,1)
+            pos_phi = pos_phi.view(emb.shape[0],1,1,1)
+        else:
+            neg_phi = th.ones_like(emb,device=emb.device).view(emb.shape[0],1,1,1)
+            pos_phi = th.ones_like(emb,device=emb.device).view(emb.shape[0],1,1,1)
+
         h = x.type(self.dtype)
         for module in self.input_blocks:
             h = module(h, emb)
             hs.append(h)
         h = self.middle_block(h, emb)
         for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
+            h = th.cat([h*pos_phi, hs.pop()*neg_phi], dim=1)
             h = module(h, emb)
         h = h.type(x.dtype)
-        return self.out(h)
+        if return_features:
+            if self.predstep==2:
+                return self.out(h),self.generator_list[0](h)
+            elif self.predstep==3:
+                return self.out(h),self.generator_list[0](h),self.generator_list[1](h)
+            else:
+                raise NotImplementedError
+        else:
+            return self.out(h)
+        
+
+class MetaGenerator(nn.Module):
+    def __init__(self,in_channel,out_channel,dims=2):
+        super().__init__()
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.block = nn.Sequential(normalization(self.in_channel),
+                                    nn.SiLU(),
+                                    zero_module(conv_nd(dims, self.in_channel, self.out_channel, 3, padding=1)))
+    def forward(self,x):
+        return self.block(x)

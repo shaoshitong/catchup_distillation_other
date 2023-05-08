@@ -270,6 +270,7 @@ class CMTrainLoop(TrainLoop):
         *,
         target_model,
         teacher_model,
+        forward_model,
         teacher_diffusion,
         training_mode,
         ema_scale_fn,
@@ -281,6 +282,7 @@ class CMTrainLoop(TrainLoop):
         self.ema_scale_fn = ema_scale_fn
         self.target_model = target_model
         self.teacher_model = teacher_model
+        self.forward_model = forward_model
         self.teacher_diffusion = teacher_diffusion
         self.total_training_steps = total_training_steps
 
@@ -300,6 +302,33 @@ class CMTrainLoop(TrainLoop):
             self._load_and_sync_teacher_parameters()
             self.teacher_model.requires_grad_(False)
             self.teacher_model.eval()
+        
+        if forward_model:
+            self._load_and_sync_forward_parameters()
+            self.forward_mp_trainer = MixedPrecisionTrainer(
+                model=self.forward_model,
+                use_fp16=self.use_fp16,
+                fp16_scale_growth=self.fp16_scale_growth,
+            )
+            self.forward_opt = RAdam(self.forward_mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay)
+            if self.resume_step:
+                self._load_forward_optimizer_state()
+            if th.cuda.is_available():
+                self.ddp_forward_model = DDP(
+                    self.forward_model,
+                    device_ids=[dist_util.dev()],
+                    output_device=dist_util.dev(),
+                    broadcast_buffers=False,
+                    bucket_cap_mb=128,
+                    find_unused_parameters=False,
+                )
+            else:
+                if dist.get_world_size() > 1:
+                    logger.warn(
+                        "Distributed training requires CUDA. "
+                        "Gradients will not be synchronized properly!"
+                    )
+                self.ddp_forward_model = self.forward_model
 
         self.global_step = self.step
         if training_mode == "progdist":
@@ -336,6 +365,25 @@ class CMTrainLoop(TrainLoop):
         dist_util.sync_params(self.target_model.parameters())
         dist_util.sync_params(self.target_model.buffers())
 
+    def _load_and_sync_forward_parameters(self):
+        resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
+        if resume_checkpoint:
+            path, name = os.path.split(resume_checkpoint)
+            forward_name = name.replace("model", "forward_model")
+            resume_forward_checkpoint = os.path.join(path, forward_name)
+            if bf.exists(resume_forward_checkpoint) and dist.get_rank() == 0:
+                logger.log(
+                    "loading model from checkpoint: {resume_forward_checkpoint}..."
+                )
+                self.target_model.load_state_dict(
+                    dist_util.load_state_dict(
+                        resume_forward_checkpoint, map_location=dist_util.dev()
+                    ),
+                )
+
+        dist_util.sync_params(self.forward_model.parameters())
+        dist_util.sync_params(self.forward_model.buffers())
+
     def _load_and_sync_teacher_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         if resume_checkpoint:
@@ -355,6 +403,18 @@ class CMTrainLoop(TrainLoop):
 
         dist_util.sync_params(self.teacher_model.parameters())
         dist_util.sync_params(self.teacher_model.buffers())
+
+    def _load_forward_optimizer_state(self):
+        main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
+        opt_checkpoint = bf.join(
+            bf.dirname(main_checkpoint), f"forward_opt{self.resume_step:06}.pt"
+        )
+        if bf.exists(opt_checkpoint):
+            logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
+            state_dict = dist_util.load_state_dict(
+                opt_checkpoint, map_location=dist_util.dev()
+            )
+            self.forward_opt.load_state_dict(state_dict)
 
     def run_loop(self):
         saved = False
@@ -388,6 +448,9 @@ class CMTrainLoop(TrainLoop):
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
         took_step = self.mp_trainer.optimize(self.opt)
+        if self.forward_model:
+            aux_took_step = self.forward_mp_trainer.optimize(self.forward_opt)
+            took_step = aux_took_step and took_step
         if took_step:
             self._update_ema()
             if self.target_model:
@@ -494,15 +557,30 @@ class CMTrainLoop(TrainLoop):
                     target_model=self.target_model,
                     model_kwargs=micro_cond,
                 )
+            elif self.training_mode == "catchingup_distillation":
+                compute_losses = functools.partial(
+                    self.diffusion.catchupdist_loss,
+                    self.ddp_model,
+                    self.ddp_forward_model,
+                    self.target_model,
+                    micro,
+                    independent = self.independent,
+                    noise = None,
+                    model_kwargs=micro_cond,
+                )
             else:
                 raise ValueError(f"Unknown training mode {self.training_mode}")
 
             if last_batch or not self.use_ddp:
                 losses = compute_losses()
             else:
-                with self.ddp_model.no_sync():
-                    losses = compute_losses()
-
+                if self.forward_model:
+                    with self.ddp_model.no_sync() and self.ddp_forward_model.no_sync():
+                        losses = compute_losses()
+                else:
+                    with self.ddp_model.no_sync():
+                        losses = compute_losses()
+                        
             if isinstance(self.schedule_sampler, LossAwareSampler):
                 self.schedule_sampler.update_with_local_losses(
                     t, losses["loss"].detach()
@@ -514,6 +592,8 @@ class CMTrainLoop(TrainLoop):
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
             self.mp_trainer.backward(loss)
+            if self.forward_model:
+                self.forward_mp_trainer.backward(loss)
 
     def save(self):
         import blobfile as bf
@@ -531,8 +611,21 @@ class CMTrainLoop(TrainLoop):
                 with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
                     th.save(state_dict, f)
 
+        def save_forward_checkpoint(params):
+            if self.forward_model:
+                state_dict = self.forward_mp_trainer.master_params_to_state_dict(params)
+                if dist.get_rank() == 0:
+                    logger.log(f"saving forward model ...")
+                    filename = f"forward_model{step:06d}.pt"
+                    if not bf.exists(bf.join(get_blob_logdir(), filename)):
+                        with bf.BlobFile(bf.join(get_blob_logdir(), filename), "wb") as f:
+                            th.save(state_dict, f)
+
+
         for rate, params in zip(self.ema_rate, self.ema_params):
             save_checkpoint(rate, params)
+        if self.forward_model:
+            save_forward_checkpoint(self.forward_mp_trainer.master_params)
 
         logger.log("saving optimizer state...")
         if dist.get_rank() == 0:
@@ -541,6 +634,12 @@ class CMTrainLoop(TrainLoop):
                 "wb",
             ) as f:
                 th.save(self.opt.state_dict(), f)
+            if self.forward_model:
+                with bf.BlobFile(
+                    bf.join(get_blob_logdir(), f"forward_opt{step:06d}.pt"),
+                    "wb",
+                ) as f:
+                    th.save(self.opt.state_dict(), f)
 
         if dist.get_rank() == 0:
             if self.target_model:

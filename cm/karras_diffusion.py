@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from piq import LPIPS
 from torchvision.transforms import RandomCrop
 from . import dist_util
-
+from .flows import OnlineSlimFlow
 from .nn import mean_flat, append_dims, append_zero
 from .random_util import get_generator
 
@@ -29,6 +29,97 @@ def get_weightings(weight_schedule, snrs, sigma_data):
     else:
         raise NotImplementedError()
     return weightings
+
+
+class RectifiedDenoiser:
+    def __init__(
+        self,
+        device,
+        num_steps=1000,
+        TN=16,
+        adapt_cu="origin",
+        predstep=1):
+        self.sam = False
+        self.N = num_steps
+        self.device = device
+        assert adapt_cu in ["origin","rule","uniform"],"adapt_cu must be one of 'origin','rule','uniform'."
+        self.adapt_cu = adapt_cu
+        self.discrete = False
+        self.TN = TN
+        self.device = device
+        self.predstep = predstep
+        self.eps = 1e-5
+        self.cudflow = lambda model,ema_model : OnlineSlimFlow(
+            device=device,
+            model = model,
+            ema_model=ema_model,
+            predstep=predstep,
+            num_steps=num_steps,
+            TN = self.TN,
+            adapt_cu=adapt_cu,
+        )
+        self.criticion_1 = self.criticion_2 = nn.MSELoss()
+
+    
+    def catchupdist_loss(
+        self,
+        flow_model,
+        forward_model,
+        ema_model,
+        x_start,
+        independent=False,
+        noise=None,    
+        model_kwargs=None,    
+    ):
+        cudflow = self.cudflow(flow_model, ema_model)
+        if model_kwargs is None:
+            model_kwargs = {}
+
+        def get_kl(mu, logvar):
+            # Return KL divergence between N(mu, var) and N(0, 1), divided by data dimension.
+            kl = 0.5 * th.sum(-1 - logvar + mu.pow(2) + logvar.exp(), dim=[1,2,3])
+            _loss_prior = th.mean(kl) / (mu.shape[1]*mu.shape[2]*mu.shape[3])
+            return _loss_prior
+        
+        if noise is None:
+            if independent:
+                z = th.randn_like(x_start)
+                loss_prior = 0
+            else:
+                assert forward_model is not None, "forward_model must be provided when independint is False."
+                z, mu, logvar = forward_model(x_start, th.ones((x_start.shape[0]), device=self.device))
+                loss_prior = get_kl(mu, logvar)
+        else:
+            z = noise
+        dims = x_start.ndim
+        pred_z_t,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z)
+        predstep_loss_list = []
+        if self.pred_step==1:
+            pred_z_t,ema_z_t,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z,pred_step=self.pred_step)
+            # Learn reverse model
+            loss_fm =self.criticion_1(pred_z_t , ema_z_t) +  self.criticion_2(pred_z_t , gt_z_t)
+        elif self.pred_step==2 or self.pred_step==3:
+            loss_fm = th.Tensor([0.]).to(self.device)
+            pred_z_t_list,ema_z_t_list,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z,pred_step=self.pred_step)
+            predstep_2_weight=[1,1/8]
+            predstep_3_weight=[1,1/16,1/81]
+            _iii = 0
+            for pred_z_t,ema_z_t in zip(pred_z_t_list,ema_z_t_list):
+                if self.pred_step == 2:
+                    predstep_loss_list.append(predstep_2_weight[_iii]*self.criticion_2(pred_z_t,ema_z_t))
+                if self.pred_step == 3:
+                    predstep_loss_list.append(predstep_3_weight[_iii]*self.criticion_2(pred_z_t,ema_z_t))
+                _iii+=1
+            for _loss in predstep_loss_list:
+                loss_fm+=_loss
+                _loss = round(_loss.item(),2)
+            loss_fm+= self.criticion_1(pred_z_t_list[0] , gt_z_t)
+        else:
+            raise NotImplementedError
+        loss_fm = loss_fm.mean()
+        loss = loss_fm + 20 * loss_prior
+        terms = {}
+        terms["loss"] = loss
 
 
 class KarrasDenoiser:

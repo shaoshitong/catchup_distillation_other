@@ -1,9 +1,10 @@
 import argparse
-
-from .karras_diffusion import KarrasDenoiser
-from .unet import UNetModel
+import torch as th
+from .karras_diffusion import KarrasDenoiser, RectifiedDenoiser
+from .unet import UNetModel,MetaGenerator
+from .forward_unet import UNetEncoder
 import numpy as np
-
+import dist_util
 NUM_CLASSES = 1000
 
 
@@ -50,6 +51,93 @@ def model_and_diffusion_defaults():
     )
     return res
 
+def forward_model_defaults():
+    res = dict(
+        image_size=64,
+        f_num_channels=32,
+        f_num_res_blocks=2,
+        f_num_heads=4,
+        f_num_heads_upsample=-1,
+        f_num_head_channels=-1,
+        f_attention_resolutions="16",
+        f_channel_mult="2,2,2",
+        f_dropout=0.13,
+        f_class_cond=False,
+        f_use_checkpoint=False,
+        f_use_scale_shift_norm=True,
+        f_resblock_updown=False,
+        f_use_fp16=False,
+        f_use_new_attention_order=False,
+        f_learn_sigma=False,
+    )
+    return res
+
+def create_meta_generator(
+    in_channel,
+    out_channel,
+    dim,
+):
+    assert out_channel == 3 or out_channel == 1,"out_channel must be 1 or 3"
+    return MetaGenerator(in_channel=in_channel,out_channel=out_channel,dim=dim)
+    
+
+def create_forward_model(    
+    image_size,
+    f_num_channels,
+    f_num_res_blocks,
+    f_channel_mult="",
+    f_learn_sigma=False,
+    f_class_cond=False,
+    f_use_checkpoint=False,
+    f_attention_resolutions="16",
+    f_num_heads=1,
+    f_num_head_channels=-1,
+    f_num_heads_upsample=-1,
+    f_use_scale_shift_norm=False,
+    f_dropout=0,
+    f_resblock_updown=False,
+    f_use_fp16=False,
+    f_use_new_attention_order=False,
+):
+    if channel_mult == "":
+        if image_size == 512:
+            channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
+        elif image_size == 256:
+            channel_mult = (1, 1, 2, 2, 4, 4)
+        elif image_size == 128:
+            channel_mult = (1, 1, 2, 3, 4)
+        elif image_size == 64:
+            channel_mult = (1, 2, 3, 4)
+        else:
+            raise ValueError(f"unsupported image size: {image_size}")
+    else:
+        channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
+
+    attention_ds = []
+    for res in f_attention_resolutions.split(","):
+        attention_ds.append(image_size // int(res))
+
+    encoder =  UNetModel(
+        image_size=image_size,
+        in_channels=3,
+        model_channels=f_num_channels,
+        out_channels=(3 if not f_learn_sigma else 6),
+        num_res_blocks=f_num_res_blocks,
+        attention_resolutions=tuple(attention_ds),
+        dropout=f_dropout,
+        channel_mult=channel_mult,
+        num_classes=(NUM_CLASSES if f_class_cond else None),
+        use_checkpoint=f_use_checkpoint,
+        use_fp16=f_use_fp16,
+        num_heads=f_num_heads,
+        num_head_channels=f_num_head_channels,
+        num_heads_upsample=f_num_heads_upsample,
+        use_scale_shift_norm=f_use_scale_shift_norm,
+        resblock_updown=f_resblock_updown,
+        use_new_attention_order=f_use_new_attention_order,
+    )
+    return UNetEncoder(encoder=encoder,input_nc=3)
+    
 
 def create_model_and_diffusion(
     image_size,
@@ -71,6 +159,11 @@ def create_model_and_diffusion(
     weight_schedule,
     sigma_min=0.002,
     sigma_max=80.0,
+    catchingup = False,
+    predstep = 1,
+    num_steps = 16,
+    adapt_cu = "uniform",
+    TN = 16,
     distillation=False,
 ):
     model = create_model(
@@ -90,16 +183,26 @@ def create_model_and_diffusion(
         resblock_updown=resblock_updown,
         use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
+        predstep = predstep,
     )
-    diffusion = KarrasDenoiser(
-        sigma_data=0.5,
-        sigma_max=sigma_max,
-        sigma_min=sigma_min,
-        distillation=distillation,
-        weight_schedule=weight_schedule,
-    )
+        
+    if catchingup:
+        diffusion = RectifiedDenoiser(
+            device=dist_util.dev(),
+            num_steps=num_steps,
+            TN = TN,
+            adapt_cu= adapt_cu,
+            predstep=predstep,
+        )
+    else:
+        diffusion = KarrasDenoiser(
+            sigma_data=0.5,
+            sigma_max=sigma_max,
+            sigma_min=sigma_min,
+            distillation=distillation,
+            weight_schedule=weight_schedule,
+        )
     return model, diffusion
-
 
 def create_model(
     image_size,
@@ -118,6 +221,7 @@ def create_model(
     resblock_updown=False,
     use_fp16=False,
     use_new_attention_order=False,
+    predstep = 1,
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -155,6 +259,7 @@ def create_model(
         use_scale_shift_norm=use_scale_shift_norm,
         resblock_updown=resblock_updown,
         use_new_attention_order=use_new_attention_order,
+        predstep=predstep,
     )
 
 
