@@ -859,7 +859,6 @@ def iterative_colorization(
 
     return x, images
 
-
 @th.no_grad()
 def iterative_inpainting(
     distiller,
@@ -919,6 +918,7 @@ def iterative_inpainting(
         x = x0 + generator.randn_like(x) * np.sqrt(next_t**2 - t_min**2)
 
     return x, images
+
 
 
 @th.no_grad()
@@ -1039,3 +1039,117 @@ def iterative_superres(
         x = x0 + generator.randn_like(x) * np.sqrt(next_t**2 - t_min**2)
 
     return x, images
+
+def rectified_sample(
+    model,
+    shape,
+    steps,
+    clip_denoised=True,
+    model_kwargs=None,
+    device=None,
+    sampler="heun",
+    generator_id=1,
+    generator=None,
+):
+    """
+    (self, z1=None, N=None, use_tqdm=True, solver = 'euler',momentum=0.0,generator_id=1):
+    """
+    if generator is None:
+        generator = get_generator("dummy")
+    x_T = generator.randn(*shape, device=device)
+
+    sample_fn = {
+        "heun": sample_heun_rect,
+        "euler": sample_euler_rect,
+        "one_step":sample_onestep_rect,
+    }[sampler]
+
+    sampler_args = dict(generator_id=generator_id,N=steps)
+
+    def denoiser(x_t, t):
+        denoised = model(x_t, t, return_features=True, **model_kwargs)[generator_id-1]
+        if clip_denoised:
+            denoised = denoised.clamp(-1, 1)
+        return denoised
+
+    x_0,_,_ = sample_fn(
+        denoiser,
+        x_T,
+        generator,
+        **sampler_args,
+    )
+    return x_0.clamp(-1, 1)
+
+
+@th.no_grad()
+def sample_euler_rect(
+    denoiser,
+    x,
+    generator,
+    N,
+):
+    indices = reversed(range(1,N+1))
+    from tqdm.auto import tqdm
+    indices = tqdm(indices)
+    dt = -1./N
+    traj = [] # to store the trajectory
+    x0hat_list = []
+    x = x.detach().clone()
+    batchsize = x.shape[0]
+    traj.append(x.detach().clone())
+
+    for i in indices:
+        t = th.ones((batchsize,1), device=x.device) * i / N
+        d = denoiser(x,t.squeeze())
+        x = x + d * dt
+        x0hat = x - d * t.view(-1,1,1,1)
+        x0hat_list.append(x0hat)
+        traj.append(x.detach().clone())
+    return x,x0hat_list,traj
+
+@th.no_grad()
+def sample_heun_rect(
+    denoiser,
+    x,
+    generator,
+    N,
+):
+    if N % 2 == 0:
+      raise ValueError("N must be odd when using Heun's method.")
+    N = (N + 1) // 2
+    indices = reversed(range(1,N+1))
+    from tqdm.auto import tqdm
+    indices = tqdm(indices)
+    dt = -1./N
+    traj = [] # to store the trajectory
+    x0hat_list = []
+    x = x.detach().clone()
+    batchsize = z.shape[0]
+    traj.append(x.detach().clone())
+
+    for i in indices:
+        t = th.ones((batchsize,1), device=x.device) * i / N
+        d = denoiser(x,t.squeeze())
+        x_next = x.detach().clone() + d * dt
+        d_next = denoiser(x_next,(t+dt).squeeze())
+        d = (d+d_next)/2
+        x = x + d * dt
+        x0hat = x - d * t.view(-1,1,1,1)
+        x0hat_list.append(x0hat)
+        traj.append(x.detach().clone())
+    return x,x0hat_list,traj
+
+@th.no_grad()
+def sample_onestep_rect(
+    denoiser,
+    x,
+    generator,
+    N,
+):
+
+    x = x.detach().clone()
+    batchsize = x.shape[0]
+    t = th.ones((batchsize,1), device=x.device)
+    d = denoiser(x,t.squeeze())
+    x = x - d
+    return x,None,None
