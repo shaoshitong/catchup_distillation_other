@@ -5,7 +5,6 @@ setup(
     py_modules=["cm", "evaluations"],
     install_requires=[
         "blobfile>=1.0.5",
-        "torch",
         "tqdm",
         "numpy",
         "scipy",
