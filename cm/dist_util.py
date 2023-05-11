@@ -40,6 +40,10 @@ def setup_dist():
     port = comm.bcast(_find_free_port(), root=0)
     os.environ["MASTER_PORT"] = str(port)
     dist.init_process_group(backend=backend, init_method="env://")
+    print("Now Rank:",comm.Get_rank())
+    if comm.Get_rank() == 0:
+        print(f"Initialized process group with {comm.size} ranks")
+        
 
 
 def dev():

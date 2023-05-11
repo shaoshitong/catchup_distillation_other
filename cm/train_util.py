@@ -238,6 +238,7 @@ class TrainLoop:
 
     def save(self):
         def save_checkpoint(rate, params):
+            print(get_blob_logdir())
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
             if dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")
@@ -275,6 +276,7 @@ class CMTrainLoop(TrainLoop):
         training_mode,
         ema_scale_fn,
         total_training_steps,
+        independent,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -285,6 +287,7 @@ class CMTrainLoop(TrainLoop):
         self.forward_model = forward_model
         self.teacher_diffusion = teacher_diffusion
         self.total_training_steps = total_training_steps
+        self.independent = independent
 
         if target_model:
             self._load_and_sync_target_parameters()
@@ -308,7 +311,7 @@ class CMTrainLoop(TrainLoop):
             self.forward_mp_trainer = MixedPrecisionTrainer(
                 model=self.forward_model,
                 use_fp16=self.use_fp16,
-                fp16_scale_growth=self.fp16_scale_growth,
+                fp16_scale_growth=self.fp16_scale_growth
             )
             self.forward_opt = RAdam(self.forward_mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay)
             if self.resume_step:
@@ -594,8 +597,6 @@ class CMTrainLoop(TrainLoop):
                 self.diffusion, t, {k: v * weights for k, v in losses.items()}
             )
             self.mp_trainer.backward(loss)
-            if self.forward_model:
-                self.forward_mp_trainer.backward(loss)
 
     def save(self):
         import blobfile as bf

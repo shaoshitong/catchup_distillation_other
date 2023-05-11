@@ -140,7 +140,9 @@ class UNetEncoder(nn.Module):
         self.input_nc = input_nc
         self.encoder = encoder
         
-
+    def convert_to_fp16(self):
+        return self.encoder.convert_to_fp16()
+    
     def forward(self, x, t = None, noise = None):
         if t is None:
             t = torch.ones((x.shape[0]), device=x.device)

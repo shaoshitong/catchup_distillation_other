@@ -13,7 +13,9 @@ from . import dist_util
 from .flows import OnlineSlimFlow
 from .nn import mean_flat, append_dims, append_zero
 from .random_util import get_generator
-
+from torchvision.utils import save_image, make_grid
+import os
+from mpi4py import MPI
 
 def get_weightings(weight_schedule, snrs, sigma_data):
     if weight_schedule == "snr":
@@ -49,6 +51,11 @@ class RectifiedDenoiser:
         self.device = device
         self.predstep = predstep
         self.eps = 1e-5
+        self.num_timesteps = TN
+        self.iteration = 0
+        self.test_dir = "./test"
+        if not os.path.exists(self.test_dir):
+            os.makedirs(self.test_dir)
         self.cudflow = lambda model,ema_model : OnlineSlimFlow(
             device=device,
             model = model,
@@ -71,7 +78,8 @@ class RectifiedDenoiser:
         noise=None,    
         model_kwargs=None,    
     ):
-        cudflow = self.cudflow(flow_model, ema_model)
+        flow_model_fn = lambda x,t,return_features=False:flow_model(x,t,return_features=return_features,**model_kwargs)
+        cudflow = self.cudflow(flow_model_fn, ema_model)
         if model_kwargs is None:
             model_kwargs = {}
 
@@ -91,35 +99,39 @@ class RectifiedDenoiser:
                 loss_prior = get_kl(mu, logvar)
         else:
             z = noise
+        z = z.type_as(x_start)
         dims = x_start.ndim
-        pred_z_t,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z)
         predstep_loss_list = []
-        if self.pred_step==1:
-            pred_z_t,ema_z_t,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z,pred_step=self.pred_step)
+        if self.predstep==1:
+            pred_z_t,ema_z_t,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z,pred_step=self.predstep)
             # Learn reverse model
             loss_fm =self.criticion_1(pred_z_t , ema_z_t) +  self.criticion_2(pred_z_t , gt_z_t)
-        elif self.pred_step==2 or self.pred_step==3:
+        elif self.predstep==2 or self.predstep==3:
             loss_fm = th.Tensor([0.]).to(self.device)
-            pred_z_t_list,ema_z_t_list,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z,pred_step=self.pred_step)
-            predstep_2_weight=[1,1/8]
-            predstep_3_weight=[1,1/16,1/81]
-            _iii = 0
+            pred_z_t_list,ema_z_t_list,gt_z_t = cudflow.get_train_tuple(z0=x_start, z1=z,pred_step=self.predstep)
             for pred_z_t,ema_z_t in zip(pred_z_t_list,ema_z_t_list):
-                if self.pred_step == 2:
-                    predstep_loss_list.append(predstep_2_weight[_iii]*self.criticion_2(pred_z_t,ema_z_t))
-                if self.pred_step == 3:
-                    predstep_loss_list.append(predstep_3_weight[_iii]*self.criticion_2(pred_z_t,ema_z_t))
-                _iii+=1
+                if self.predstep == 2:
+                    predstep_loss_list.append(self.criticion_2(pred_z_t,ema_z_t))
+                if self.predstep == 3:
+                    predstep_loss_list.append(self.criticion_2(pred_z_t,ema_z_t))
+            for pred_z_t in (pred_z_t_list):
+                predstep_loss_list.append(self.criticion_2(pred_z_t,gt_z_t))
             for _loss in predstep_loss_list:
                 loss_fm+=_loss
-                _loss = round(_loss.item(),2)
-            loss_fm+= self.criticion_1(pred_z_t_list[0] , gt_z_t)
+                _loss = round(_loss.detach().clone().item(),2)
         else:
             raise NotImplementedError
         loss_fm = loss_fm.mean()
         loss = loss_fm + 20 * loss_prior
+        comm = MPI.COMM_WORLD
+        if comm.Get_rank() == 0 and self.iteration%10000==0:
+            print(x_start.max(),x_start.min())
+            save_image(x_start[:16]*0.5+0.5,os.path.join(self.test_dir,f"x_start_{self.iteration}.png"), nrow=4)
+            save_image((z[:16] - pred_z_t[:16])*0.5+0.5,os.path.join(self.test_dir,f"one_step_{self.iteration}.png"), nrow=4)
+        self.iteration +=1
         terms = {}
         terms["loss"] = loss
+        return terms
 
 
 class KarrasDenoiser:
@@ -209,7 +221,7 @@ class KarrasDenoiser:
             model_kwargs = {}
         if noise is None:
             noise = th.randn_like(x_start)
-
+    
         dims = x_start.ndim
 
         def denoise_fn(x, t):
@@ -326,7 +338,7 @@ class KarrasDenoiser:
 
         terms = {}
         terms["loss"] = loss
-
+        print(loss,)
         return terms
 
     def progdist_losses(

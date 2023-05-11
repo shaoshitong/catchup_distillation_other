@@ -22,13 +22,33 @@ import torch.distributed as dist
 import copy
 
 """
-mpiexec -n 8 python cm_train.py --training_mode consistency_distillation --target_ema_mode fixed \
+mpiexec -n 2 python cm_train.py --training_mode consistency_distillation --target_ema_mode fixed \
     --start_ema 0.95 --scale_mode fixed --start_scales 40 --total_training_steps 600000 \
     --loss_norm lpips --lr_anneal_steps 0 --teacher_model_path /path/to/edm_imagenet64_ema.pt \
     --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 \
     --teacher_dropout 0.1 --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 2048 \
     --image_size 64 --lr 0.000008 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 \
-    --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0 --weight_schedule uniform --data_dir /path/to/data
+    --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0 --weight_schedule uniform --data_dir /path/to/data \
+    --predstep 1 --adapt-cu uniform --TN 16
+
+mpiexec --allow-run-as-root -n 8 python cm_train.py --training_mode catchingup_distillation \
+    --target_ema_mode fixed --start_ema 0.95 --scale_mode fixed --start_scales 40 \
+    --total_training_steps 1200000 --loss_norm l2 --lr_anneal_steps 0 \
+    --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.1 \
+    --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 1024 --image_size 64 --lr 0.00015 --num_channels 192 \
+    --num_head_channels 64 --num_res_blocks 3 --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0 \
+    --weight_schedule uniform --data_dir /home/imagenet/train \
+    --predstep 1 --adapt_cu uniform --TN 16
+
+mpiexec --allow-run-as-root -n 2 python cm_train.py --training_mode catchingup_distillation     --target_ema_mode fixed --start_ema 0.95 --scale_mode fixed --start_scales 40     --total_training_steps 1200000 --loss_norm l2 --lr_anneal_steps 0     --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.1     --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 256 --image_size 64 --lr 0.00015 --num_channels 192     --num_head_channels 64 --num_res_blocks 3 --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0     --weight_schedule uniform --data_dir /home/imagenet/train     --predstep 1 --adapt_cu uniform --TN 16
+
+mpiexec --allow-run-as-root -n 2 python cm_train.py --training_mode consistency_distillation \
+    --target_ema_mode fixed --start_ema 0.95 --scale_mode fixed --start_scales 40 \
+    --total_training_steps 600000 --loss_norm l2 --lr_anneal_steps 0 --teacher_model_path ./checkpoints/edm_imagenet64_ema.pt \
+    --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --teacher_dropout 0.1 \
+    --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 256 --image_size 64 --lr 0.000008 --num_channels 192 \
+    --num_head_channels 64 --num_res_blocks 3 --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0 \
+     --weight_schedule uniform --data_dir /home/imagenet/train
 """
 def main():
     args = create_argparser().parse_args()
@@ -65,10 +85,13 @@ def main():
     model, diffusion = create_model_and_diffusion(**model_and_diffusion_kwargs)
     print("After Compling ......")
     if catchingup:
-        forward_model_kwargs = args_to_dict(args, forward_model_defaults().keys())
+        forward_model_kwargs = forward_model_defaults()
+        forward_model_kwargs["image_size"] = args.image_size
         forward_model = create_forward_model(**forward_model_kwargs)
         forward_model.to(dist_util.dev())
         forward_model.train()
+        if args.use_fp16:
+            forward_model.encoder.convert_to_fp16()
     else:
         forward_model = None
 
@@ -124,22 +147,25 @@ def main():
 
     # load the target model for distillation, if path specified.
 
-    logger.log("creating the target model")
-    target_model, _ = create_model_and_diffusion(
-        **model_and_diffusion_kwargs,
-    )
+    if "consistency" in args.training_mode:
+        logger.log("creating the target model")
+        target_model, _ = create_model_and_diffusion(
+            **model_and_diffusion_kwargs,
+        )
 
-    target_model.to(dist_util.dev())
-    target_model.train()
+        target_model.to(dist_util.dev())
+        target_model.train()
 
-    dist_util.sync_params(target_model.parameters())
-    dist_util.sync_params(target_model.buffers())
+        dist_util.sync_params(target_model.parameters())
+        dist_util.sync_params(target_model.buffers())
 
-    for dst, src in zip(target_model.parameters(), model.parameters()):
-        dst.data.copy_(src.data)
+        for dst, src in zip(target_model.parameters(), model.parameters()):
+            dst.data.copy_(src.data)
 
-    if args.use_fp16:
-        target_model.convert_to_fp16()
+        if args.use_fp16:
+            target_model.convert_to_fp16()
+    else:
+        target_model = None
 
     logger.log("training...")
     CMTrainLoop(
@@ -164,6 +190,7 @@ def main():
         fp16_scale_growth=args.fp16_scale_growth,
         schedule_sampler=schedule_sampler,
         weight_decay=args.weight_decay,
+        independent = args.independent,
         lr_anneal_steps=args.lr_anneal_steps,
     ).run_loop()
 
@@ -188,6 +215,9 @@ def create_argparser():
         predstep = 1,
         num_steps = 16,
         adapt_cu = "uniform",
+        independent = False,
+        prior_shakedrop = True,
+        phi = 0.75,
         TN = 16,
     )
     defaults.update(model_and_diffusion_defaults())

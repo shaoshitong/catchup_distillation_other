@@ -48,6 +48,8 @@ def model_and_diffusion_defaults():
         use_new_attention_order=False,
         learn_sigma=False,
         weight_schedule="karras",
+        prior_shakedrop = True,
+        phi = 0.75,
     )
     return res
 
@@ -66,7 +68,7 @@ def forward_model_defaults():
         f_use_checkpoint=False,
         f_use_scale_shift_norm=True,
         f_resblock_updown=False,
-        f_use_fp16=False,
+        f_use_fp16=True,
         f_use_new_attention_order=False,
         f_learn_sigma=False,
     )
@@ -99,19 +101,19 @@ def create_forward_model(
     f_use_fp16=False,
     f_use_new_attention_order=False,
 ):
-    if channel_mult == "":
+    if f_channel_mult == "":
         if image_size == 512:
-            channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
+            f_channel_mult = (0.5, 1, 1, 2, 2, 4, 4)
         elif image_size == 256:
-            channel_mult = (1, 1, 2, 2, 4, 4)
+            f_channel_mult = (1, 1, 2, 2, 4, 4)
         elif image_size == 128:
-            channel_mult = (1, 1, 2, 3, 4)
+            f_channel_mult = (1, 1, 2, 3, 4)
         elif image_size == 64:
-            channel_mult = (1, 2, 3, 4)
+            f_channel_mult = (1, 2, 3, 4)
         else:
             raise ValueError(f"unsupported image size: {image_size}")
     else:
-        channel_mult = tuple(int(ch_mult) for ch_mult in channel_mult.split(","))
+        f_channel_mult = tuple(int(ch_mult) for ch_mult in f_channel_mult.split(","))
 
     attention_ds = []
     for res in f_attention_resolutions.split(","):
@@ -121,11 +123,11 @@ def create_forward_model(
         image_size=image_size,
         in_channels=3,
         model_channels=f_num_channels,
-        out_channels=(3 if not f_learn_sigma else 6),
+        out_channels=6,
         num_res_blocks=f_num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=f_dropout,
-        channel_mult=channel_mult,
+        channel_mult=f_channel_mult,
         num_classes=(NUM_CLASSES if f_class_cond else None),
         use_checkpoint=f_use_checkpoint,
         use_fp16=f_use_fp16,
@@ -165,6 +167,8 @@ def create_model_and_diffusion(
     adapt_cu = "uniform",
     TN = 16,
     distillation=False,
+    prior_shakedrop = False,
+    phi = 0.75,
 ):
     model = create_model(
         image_size,
@@ -184,6 +188,8 @@ def create_model_and_diffusion(
         use_fp16=use_fp16,
         use_new_attention_order=use_new_attention_order,
         predstep = predstep,
+        prior_shakedrop = prior_shakedrop,
+        phi = phi,
     )
         
     if catchingup:
@@ -222,6 +228,8 @@ def create_model(
     use_fp16=False,
     use_new_attention_order=False,
     predstep = 1,
+    prior_shakedrop = False,
+    phi = 0.75,
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -262,6 +270,8 @@ def create_model(
         resblock_updown=resblock_updown,
         use_new_attention_order=use_new_attention_order,
         predstep=predstep,
+        prior_shakedrop = prior_shakedrop,
+        phi = phi,
     )
 
 

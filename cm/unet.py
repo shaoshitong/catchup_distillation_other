@@ -315,7 +315,7 @@ class AttentionBlock(nn.Module):
 
     def _forward(self, x, encoder_out=None):
         b, _, *spatial = x.shape
-        qkv = self.qkv(self.norm(x)).view(b, -1, np.prod(spatial))
+        qkv = self.qkv(self.norm(x)).view(b, -1, np.prod(spatial)).half()
         if encoder_out is not None:
             encoder_out = self.encoder_kv(encoder_out)
             h = checkpoint(
@@ -323,6 +323,8 @@ class AttentionBlock(nn.Module):
             )
         else:
             h = checkpoint(self.attention, (qkv,), (), self.use_attention_checkpoint)
+        h = h.type_as(x)
+        qkv = qkv.type_as(x)
         h = h.view(b, -1, *spatial)
         h = self.proj_out(h)
         return x + h
@@ -371,6 +373,7 @@ class QKVFlashAttention(nn.Module):
             need_weights=need_weights,
             causal=self.causal,
         )
+        qkv = qkv
         return self.rearrange(qkv, "b s h d -> b (h d) s")
 
 
@@ -556,7 +559,7 @@ class UNetModel(nn.Module):
         use_new_attention_order=False,
         predstep = 1,
         prior_shakedrop     = False,        # If applying Prior ShakeDrop to the network.
-        phi                 = 0.25,          # Prior ShakeDrop probability.
+        phi                 = 0.75,         # Prior ShakeDrop probability.
 
     ):
         super().__init__()
@@ -566,6 +569,9 @@ class UNetModel(nn.Module):
 
         self.prior_shakedrop = prior_shakedrop
         self.phi = phi
+        from mpi4py import MPI
+        if MPI.COMM_WORLD.Get_rank()==0:
+            print("Apply Prior ShakeDrop to the network: ", self.prior_shakedrop, " Phi: ", self.phi)
         self.predstep = predstep,
         self.image_size = image_size
         self.in_channels = in_channels
@@ -777,11 +783,11 @@ class UNetModel(nn.Module):
             phi = timesteps * (1- 2*self.phi) + self.phi
             neg_phi = 2 * (1 - phi) # noise_label is 0, neg_phi is 1.4; noise_label is 1, neg_phi is 0.6
             pos_phi = 2 * phi       # noise_label is 0, pos_phi is 0.6; noise_label is 1, pos_phi is 1.4
-            neg_phi = neg_phi.view(timesteps.shape[0],1,1,1).half()
-            pos_phi = pos_phi.view(timesteps.shape[0],1,1,1).half()
+            neg_phi = neg_phi.view(timesteps.shape[0],1,1,1).type(self.dtype)
+            pos_phi = pos_phi.view(timesteps.shape[0],1,1,1).type(self.dtype)
         else:
-            neg_phi = th.ones_like(timesteps,device=timesteps.device).view(timesteps.shape[0],1,1,1).half()
-            pos_phi = th.ones_like(timesteps,device=timesteps.device).view(timesteps.shape[0],1,1,1).half()
+            neg_phi = th.ones_like(timesteps,device=timesteps.device).view(timesteps.shape[0],1,1,1).type(self.dtype)
+            pos_phi = th.ones_like(timesteps,device=timesteps.device).view(timesteps.shape[0],1,1,1).type(self.dtype)
 
         h = x.type(self.dtype)
         for module in self.input_blocks:
