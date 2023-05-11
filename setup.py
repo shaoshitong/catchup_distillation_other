@@ -15,7 +15,7 @@ setup(
         "albumentations==0.4.3",
         "lmdb",
         "clip @ git+https://github.com/openai/CLIP.git",
-        "mpi4py",
+        # "mpi4py",
         "flash-attn",
         "pillow",
     ],

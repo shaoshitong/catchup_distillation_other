@@ -357,7 +357,7 @@ class QKVFlashAttention(nn.Module):
         assert self.head_dim in [16, 32, 64], "Only support head_dim == 16, 32, or 64"
 
         self.inner_attn = FlashAttention(
-            attention_dropout=attention_dropout, **factory_kwargs
+            attention_dropout=attention_dropout,
         )
         self.rearrange = rearrange
 
@@ -774,14 +774,14 @@ class UNetModel(nn.Module):
             emb = emb + self.label_emb(y)
 
         if self.prior_shakedrop:
-            phi = emb * (1- 2*self.phi) + self.phi
+            phi = timesteps * (1- 2*self.phi) + self.phi
             neg_phi = 2 * (1 - phi) # noise_label is 0, neg_phi is 1.4; noise_label is 1, neg_phi is 0.6
             pos_phi = 2 * phi       # noise_label is 0, pos_phi is 0.6; noise_label is 1, pos_phi is 1.4
-            neg_phi = neg_phi.view(emb.shape[0],1,1,1)
-            pos_phi = pos_phi.view(emb.shape[0],1,1,1)
+            neg_phi = neg_phi.view(timesteps.shape[0],1,1,1).half()
+            pos_phi = pos_phi.view(timesteps.shape[0],1,1,1).half()
         else:
-            neg_phi = th.ones_like(emb,device=emb.device).view(emb.shape[0],1,1,1)
-            pos_phi = th.ones_like(emb,device=emb.device).view(emb.shape[0],1,1,1)
+            neg_phi = th.ones_like(timesteps,device=timesteps.device).view(timesteps.shape[0],1,1,1).half()
+            pos_phi = th.ones_like(timesteps,device=timesteps.device).view(timesteps.shape[0],1,1,1).half()
 
         h = x.type(self.dtype)
         for module in self.input_blocks:
