@@ -19,7 +19,7 @@ from .fp16_util import (
     master_params_to_model_params,
 )
 import numpy as np
-
+from torch.nn.utils import clip_grad_norm_
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
 # 20-21 within the first ~1K steps of training.
@@ -71,7 +71,7 @@ class TrainLoop:
         self.global_batch = self.batch_size * dist.get_world_size()
 
         self.sync_cuda = th.cuda.is_available()
-
+        print("Now Rank: ", dist.get_rank(), "Sync cuda: ", self.sync_cuda)
         self._load_and_sync_parameters()
         self.mp_trainer = MixedPrecisionTrainer(
             model=self.model,
@@ -121,16 +121,14 @@ class TrainLoop:
 
         if resume_checkpoint:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
-            if dist.get_rank() == 0:
-                logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
-                self.model.load_state_dict(
-                    dist_util.load_state_dict(
-                        resume_checkpoint, map_location=dist_util.dev()
-                    ),
-                )
-
-        dist_util.sync_params(self.model.parameters())
-        dist_util.sync_params(self.model.buffers())
+            logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+            self.model.load_state_dict(
+                dist_util.load_state_dict(
+                    resume_checkpoint, map_location=dist_util.dev()
+                ),
+            )
+        # dist_util.sync_params(self.model.parameters())
+        # dist_util.sync_params(self.model.buffers())
 
     def _load_ema_parameters(self, rate):
         ema_params = copy.deepcopy(self.mp_trainer.master_params)
@@ -138,14 +136,14 @@ class TrainLoop:
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
         if ema_checkpoint:
-            if dist.get_rank() == 0:
-                logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
-                state_dict = dist_util.load_state_dict(
-                    ema_checkpoint, map_location=dist_util.dev()
-                )
-                ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
+            # if dist.get_rank() == 0:
+            logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
+            state_dict = dist_util.load_state_dict(
+                ema_checkpoint, map_location=dist_util.dev()
+            )
+            ema_params = self.mp_trainer.state_dict_to_master_params(state_dict)
 
-        dist_util.sync_params(ema_params)
+        # dist_util.sync_params(ema_params)
         return ema_params
 
     def _load_optimizer_state(self):
@@ -355,7 +353,7 @@ class CMTrainLoop(TrainLoop):
             path, name = os.path.split(resume_checkpoint)
             target_name = name.replace("model", "target_model")
             resume_target_checkpoint = os.path.join(path, target_name)
-            if bf.exists(resume_target_checkpoint) and dist.get_rank() == 0:
+            if bf.exists(resume_target_checkpoint):
                 logger.log(
                     "loading model from checkpoint: {resume_target_checkpoint}..."
                 )
@@ -365,8 +363,8 @@ class CMTrainLoop(TrainLoop):
                     ),
                 )
 
-        dist_util.sync_params(self.target_model.parameters())
-        dist_util.sync_params(self.target_model.buffers())
+        # dist_util.sync_params(self.target_model.parameters())
+        # dist_util.sync_params(self.target_model.buffers())
 
     def _load_and_sync_forward_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -374,18 +372,18 @@ class CMTrainLoop(TrainLoop):
             path, name = os.path.split(resume_checkpoint)
             forward_name = name.replace("model", "forward_model")
             resume_forward_checkpoint = os.path.join(path, forward_name)
-            if bf.exists(resume_forward_checkpoint) and dist.get_rank() == 0:
+            if bf.exists(resume_forward_checkpoint):
                 logger.log(
                     "loading model from checkpoint: {resume_forward_checkpoint}..."
                 )
-                self.target_model.load_state_dict(
+                self.forward_model.load_state_dict(
                     dist_util.load_state_dict(
                         resume_forward_checkpoint, map_location=dist_util.dev()
                     ),
                 )
 
-        dist_util.sync_params(self.forward_model.parameters())
-        dist_util.sync_params(self.forward_model.buffers())
+        # dist_util.sync_params(self.forward_model.parameters())
+        # dist_util.sync_params(self.forward_model.buffers())
 
     def _load_and_sync_teacher_parameters(self):
         resume_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -394,7 +392,7 @@ class CMTrainLoop(TrainLoop):
             teacher_name = name.replace("model", "teacher_model")
             resume_teacher_checkpoint = os.path.join(path, teacher_name)
 
-            if bf.exists(resume_teacher_checkpoint) and dist.get_rank() == 0:
+            if bf.exists(resume_teacher_checkpoint):
                 logger.log(
                     "loading model from checkpoint: {resume_teacher_checkpoint}..."
                 )
@@ -404,8 +402,8 @@ class CMTrainLoop(TrainLoop):
                     ),
                 )
 
-        dist_util.sync_params(self.teacher_model.parameters())
-        dist_util.sync_params(self.teacher_model.buffers())
+        # dist_util.sync_params(self.teacher_model.parameters())
+        # dist_util.sync_params(self.teacher_model.buffers())
 
     def _load_forward_optimizer_state(self):
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
@@ -450,6 +448,9 @@ class CMTrainLoop(TrainLoop):
 
     def run_step(self, batch, cond):
         self.forward_backward(batch, cond)
+        # clip_grad_norm_(self.mp_trainer.master_params, max_norm=5.0)
+        # if self.forward_model:
+        #     clip_grad_norm_(self.forward_mp_trainer.master_params, max_norm=5.0)
         took_step = self.mp_trainer.optimize(self.opt)
         if self.forward_model:
             aux_took_step = self.forward_mp_trainer.optimize(self.forward_opt)
@@ -642,7 +643,7 @@ class CMTrainLoop(TrainLoop):
                     bf.join(get_blob_logdir(), f"forward_opt{step:06d}.pt"),
                     "wb",
                 ) as f:
-                    th.save(self.opt.state_dict(), f)
+                    th.save(self.forward_opt.state_dict(), f)
 
         if dist.get_rank() == 0:
             if self.target_model:

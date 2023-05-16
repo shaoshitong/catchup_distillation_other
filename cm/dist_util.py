@@ -75,15 +75,20 @@ def load_state_dict(path, **kwargs):
         for _ in range(num_chunks):
             data += MPI.COMM_WORLD.bcast(None)
 
-    return th.load(io.BytesIO(data), **kwargs)
+    state_dict = th.load(io.BytesIO(data), **kwargs)
+    print("Now Rank:",MPI.COMM_WORLD.Get_rank())
+    print("keys:",list(state_dict.keys())[:10])
+    return state_dict
 
 
 def sync_params(params):
     """
     Synchronize a sequence of Tensors across ranks from rank 0.
     """
+    print("1 Now Rank:",MPI.COMM_WORLD.Get_rank())
     for p in params:
         with th.no_grad():
+            print("Now Rank:",MPI.COMM_WORLD.Get_rank())
             dist.broadcast(p, 0)
 
 

@@ -71,7 +71,7 @@ def main():
             model_kwargs["y"] = classes
 
         if catchingup:
-            rectified_sample(
+            sample = rectified_sample(
                     model,
                     (args.batch_size, 3, args.image_size, args.image_size),
                     steps=args.steps,

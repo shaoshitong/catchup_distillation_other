@@ -38,7 +38,7 @@ mpiexec --allow-run-as-root -n 8 python cm_train.py --training_mode catchingup_d
     --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 1024 --image_size 64 --lr 0.00015 --num_channels 192 \
     --num_head_channels 64 --num_res_blocks 3 --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0 \
     --weight_schedule uniform --data_dir /home/imagenet/train \
-    --predstep 1 --adapt_cu uniform --TN 16
+    --predstep 1 --adapt_cu uniform --TN 16 --resume_checkpoint /tmp/checkpoint/model064000.pt
 
 mpiexec --allow-run-as-root -n 2 python cm_train.py --training_mode catchingup_distillation     --target_ema_mode fixed --start_ema 0.95 --scale_mode fixed --start_scales 40     --total_training_steps 1200000 --loss_norm l2 --lr_anneal_steps 0     --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.1     --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 256 --image_size 64 --lr 0.00015 --num_channels 192     --num_head_channels 64 --num_res_blocks 3 --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0     --weight_schedule uniform --data_dir /home/imagenet/train     --predstep 1 --adapt_cu uniform --TN 16
 
@@ -207,7 +207,7 @@ def create_argparser():
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
-        save_interval=10000,
+        save_interval=2000,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,

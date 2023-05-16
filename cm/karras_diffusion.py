@@ -52,7 +52,7 @@ class RectifiedDenoiser:
         self.predstep = predstep
         self.eps = 1e-5
         self.num_timesteps = TN
-        self.iteration = 0
+        self.iteration = 74000
         self.test_dir = "./test"
         if not os.path.exists(self.test_dir):
             os.makedirs(self.test_dir)
@@ -122,9 +122,9 @@ class RectifiedDenoiser:
         else:
             raise NotImplementedError
         loss_fm = loss_fm.mean()
-        loss = loss_fm + 20 * loss_prior
+        loss = loss_fm + 5 * loss_prior
         comm = MPI.COMM_WORLD
-        if comm.Get_rank() == 0 and self.iteration%10000==0:
+        if comm.Get_rank() == 0 and self.iteration%2000==0:
             print(x_start.max(),x_start.min())
             save_image(x_start[:16]*0.5+0.5,os.path.join(self.test_dir,f"x_start_{self.iteration}.png"), nrow=4)
             save_image((z[:16] - pred_z_t[:16])*0.5+0.5,os.path.join(self.test_dir,f"one_step_{self.iteration}.png"), nrow=4)
@@ -133,6 +133,9 @@ class RectifiedDenoiser:
         terms["loss"] = loss
         return terms
 
+    def denoise(self,model, x_t, sigma, **model_kwargs):
+        z_x = model(x_t,sigma,**model_kwargs)
+        return z_x
 
 class KarrasDenoiser:
     def __init__(
@@ -1087,6 +1090,7 @@ def rectified_sample(
     x_0,_,_ = sample_fn(
         denoiser,
         x_T,
+        th.ones(x_T.shape[0]).float().to(x_T.device),
         generator,
         **sampler_args,
     )
@@ -1097,10 +1101,11 @@ def rectified_sample(
 def sample_euler_rect(
     denoiser,
     x,
+    ts,
     generator,
     N,
 ):
-    indices = reversed(range(1,N+1))
+    indices = reversed(range(1,ts+1))
     from tqdm.auto import tqdm
     indices = tqdm(indices)
     dt = -1./N
@@ -1123,13 +1128,14 @@ def sample_euler_rect(
 def sample_heun_rect(
     denoiser,
     x,
+    ts,
     generator,
     N,
 ):
     if N % 2 == 0:
       raise ValueError("N must be odd when using Heun's method.")
     N = (N + 1) // 2
-    indices = reversed(range(1,N+1))
+    indices = reversed(range(1,ts+1))
     from tqdm.auto import tqdm
     indices = tqdm(indices)
     dt = -1./N
