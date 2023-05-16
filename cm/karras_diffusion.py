@@ -125,7 +125,6 @@ class RectifiedDenoiser:
         loss = loss_fm + 5 * loss_prior
         comm = MPI.COMM_WORLD
         if comm.Get_rank() == 0 and self.iteration%2000==0:
-            print(x_start.max(),x_start.min())
             save_image(x_start[:16]*0.5+0.5,os.path.join(self.test_dir,f"x_start_{self.iteration}.png"), nrow=4)
             save_image((z[:16] - pred_z_t[:16])*0.5+0.5,os.path.join(self.test_dir,f"one_step_{self.iteration}.png"), nrow=4)
         self.iteration +=1
@@ -341,7 +340,6 @@ class KarrasDenoiser:
 
         terms = {}
         terms["loss"] = loss
-        print(loss,)
         return terms
 
     def progdist_losses(
@@ -1072,29 +1070,32 @@ def rectified_sample(
     if generator is None:
         generator = get_generator("dummy")
     x_T = generator.randn(*shape, device=device)
-
+    noise = x_T.detach().clone()
     sample_fn = {
         "heun": sample_heun_rect,
         "euler": sample_euler_rect,
-        "one_step":sample_onestep_rect,
+        "onestep":sample_onestep_rect,
     }[sampler]
 
-    sampler_args = dict(generator_id=generator_id,N=steps)
+    sampler_args = dict(N=steps)
 
     def denoiser(x_t, t):
-        denoised = model(x_t, t, return_features=True, **model_kwargs)[generator_id-1]
+
+        denoised = model(x_t, t, return_features=True, **model_kwargs)
+        if isinstance(denoised,tuple) or isinstance(denoised,list):
+            denoised = denoised[generator_id-1]
         if clip_denoised:
             denoised = denoised.clamp(-1, 1)
         return denoised
 
-    x_0,_,_ = sample_fn(
+    x_0,x0hat_list,_ = sample_fn(
         denoiser,
         x_T,
-        th.ones(x_T.shape[0]).float().to(x_T.device),
+        steps,
         generator,
         **sampler_args,
     )
-    return x_0.clamp(-1, 1)
+    return x_0,noise,x0hat_list
 
 
 @th.no_grad()
@@ -1142,7 +1143,7 @@ def sample_heun_rect(
     traj = [] # to store the trajectory
     x0hat_list = []
     x = x.detach().clone()
-    batchsize = z.shape[0]
+    batchsize = x.shape[0]
     traj.append(x.detach().clone())
 
     for i in indices:

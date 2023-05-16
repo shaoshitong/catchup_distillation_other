@@ -29,6 +29,7 @@ def model_and_diffusion_defaults():
     Defaults for image training.
     """
     res = dict(
+        save_z = False,
         sigma_min=0.002,
         sigma_max=80.0,
         image_size=64,
@@ -160,6 +161,7 @@ def create_model_and_diffusion(
     use_new_attention_order,
     weight_schedule,
     sigma_min=0.002,
+    save_z = False,
     sigma_max=80.0,
     catchingup = False,
     predstep = 1,

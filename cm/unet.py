@@ -572,7 +572,7 @@ class UNetModel(nn.Module):
         from mpi4py import MPI
         if MPI.COMM_WORLD.Get_rank()==0:
             print("Apply Prior ShakeDrop to the network: ", self.prior_shakedrop, " Phi: ", self.phi)
-        self.predstep = predstep,
+        self.predstep = predstep
         self.image_size = image_size
         self.in_channels = in_channels
         self.model_channels = model_channels
@@ -799,7 +799,9 @@ class UNetModel(nn.Module):
             h = module(h, emb)
         h = h.type(x.dtype)
         if return_features:
-            if self.predstep==2:
+            if self.predstep==1:
+                return self.out(h)
+            elif self.predstep==2:
                 return self.out(h),self.generator_list[0](h)
             elif self.predstep==3:
                 return self.out(h),self.generator_list[0](h),self.generator_list[1](h)

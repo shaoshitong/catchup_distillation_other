@@ -236,7 +236,6 @@ class TrainLoop:
 
     def save(self):
         def save_checkpoint(rate, params):
-            print(get_blob_logdir())
             state_dict = self.mp_trainer.master_params_to_state_dict(params)
             if dist.get_rank() == 0:
                 logger.log(f"saving model {rate}...")

@@ -9,7 +9,7 @@ import os
 import numpy as np
 import torch as th
 import torch.distributed as dist
-from functools import cache
+# from functools import cache
 from mpi4py import MPI
 
 from cm import dist_util, logger
@@ -102,9 +102,10 @@ def main():
                     generator=generator,   
                 )
             else:   
-                sample = sample_euler_rect(
+                sample,_,_ = sample_euler_rect(
                     denoiser,
                     x_T,
+                    ts,
                     N=args.steps,
                     generator=generator,
                 )
@@ -144,7 +145,7 @@ def main():
 
         return arr, preds
 
-    @cache
+    # @cache
     def get_fid(p, begin=(0,), end=(args.steps - 1,)):
 
         samples, preds = sample_generator(begin + (p,) + end)

@@ -45,7 +45,11 @@ mpiexec -n 8 python cm_train.py --training_mode consistency_training --target_em
 #################################################################################
 
 ## ImageNet-64
-mpiexec -n 8 python image_sample.py --batch_size 256 --training_mode consistency_distillation --sampler onestep --model_path /path/to/checkpoint --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 --num_samples 500 --resblock_updown True --use_fp16 True --weight_schedule uniform
+#mpiexec -n 8 python image_sample.py --batch_size 256 --training_mode consistency_distillation --sampler onestep --model_path /path/to/checkpoint --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 --num_samples 500 --resblock_updown True --use_fp16 True --weight_schedule uniform
+mpiexec --allow-run-as-root -n 1 python image_sample.py --batch_size 32 --training_mode catchingup_distillation --sampler onestep --model_path /home/Bigdata/ode_flow_runs/ema_0.9999432189950708_162000.pt \
+ --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 --num_samples 500 \
+ --resblock_updown True --use_fp16 True --weight_schedule uniform
+
 
 ## LSUN-256
 mpiexec -n 8 python image_sample.py --batch_size 32 --generator determ-indiv --training_mode consistency_distillation --sampler onestep --model_path /root/consistency/ct_bedroom256.pt --attention_resolutions 32,16,8 --class_cond False --use_scale_shift_norm False --dropout 0.0 --image_size 256 --num_channels 256 --num_head_channels 64 --num_res_blocks 2 --num_samples 100 --resblock_updown True --use_fp16 True --weight_schedule uniform
@@ -58,7 +62,7 @@ mpiexec -n 8 python image_sample.py --batch_size 32 --generator determ-indiv --t
 mpiexec -n 8 python ternary_search.py --begin 0 --end 39 --steps 40 --generator determ --ref_batch /root/consistency/ref_batches/imagenet64.npz --batch_size 256 --model_path /root/consistency/cd_imagenet64_lpips.pt --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 --num_samples 50000 --resblock_updown True --use_fp16 True --weight_schedule uniform
 
 ## CT on ImageNet-64
-mpiexec -n 8 python ternary_search.py --begin 0 --end 200 --steps 201 --generator determ --ref_batch /root/consistency/ref_batches/imagenet64.npz --batch_size 256 --model_path /root/consistency/ct_imagenet64.pt --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 --num_samples 50000 --resblock_updown True --use_fp16 True --weight_schedule uniform
+mpiexec --allow-run-as-root -n 1 python ternary_search.py --training_mode catchingup_distillation --begin 0 --end 200 --steps 201 --generator determ --ref_batch /home/Bigdata/ode_flow_runs/VIRTUAL_imagenet64_labeled.npz --batch_size 32 --model_path /home/Bigdata/ode_flow_runs/ema_0.9999432189950708_162000.pt --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --num_head_channels 64 --num_res_blocks 3 --num_samples 50 --resblock_updown True --use_fp16 True --weight_schedule uniform
 
 ## CD on LSUN-256
 mpiexec -n 8 python ternary_search.py --begin 0 --end 39 --steps 40 --generator determ-indiv --ref_batch /root/consistency/ref_batches/bedroom256.npz --batch_size 32 --model_path /root/consistency/cd_bedroom256_lpips.pt --attention_resolutions 32,16,8 --class_cond False --use_scale_shift_norm False --dropout 0.0 --image_size 256 --num_channels 256 --num_head_channels 64 --num_res_blocks 2 --num_samples 50000 --resblock_updown True --use_fp16 True --weight_schedule uniform

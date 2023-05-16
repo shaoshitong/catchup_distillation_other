@@ -77,7 +77,7 @@ class FIDAndIS:
         self,
         softmax_batch_size=512,
         clip_score_batch_size=512,
-        path="https://openaipublic.blob.core.windows.net/consistency/inception/inception-2015-12-05.pt",
+        path="/home/Bigdata/ode_flow_runs/inception-2015-12-05.pt",
     ):
         import clip
 
