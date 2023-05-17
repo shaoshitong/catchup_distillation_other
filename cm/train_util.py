@@ -573,6 +573,16 @@ class CMTrainLoop(TrainLoop):
                     noise = None,
                     model_kwargs=micro_cond,
                 )
+            elif self.training_mode == "catchingup_distillation_with_karra":
+                compute_losses = functools.partial(
+                    self.diffusion.catchupdist_loss,
+                    self.ddp_model,
+                    self.ddp_forward_model,
+                    micro,
+                    num_scales,
+                    noise = None,
+                    model_kwargs=micro_cond,
+                )
             else:
                 raise ValueError(f"Unknown training mode {self.training_mode}")
 

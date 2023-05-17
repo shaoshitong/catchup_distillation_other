@@ -5,7 +5,7 @@ from PIL import Image
 import argparse
 
 parser = argparse.ArgumentParser(description='Turn NPZ to IMAGE')
-parser.add_argument('--npz_path', default='/tmp/openai-2023-05-16-20-40-13-882135/samples_500x64x64x3.npz', type=str)
+parser.add_argument('--npz_path', default='/tmp/openai-2023-05-17-19-17-04-324341/samples_500x64x64x3.npz', type=str)
 parser.add_argument('--save_path', default='./images/', type=str)
 arg = parser.parse_args()
 

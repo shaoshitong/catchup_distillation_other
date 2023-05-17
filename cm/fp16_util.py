@@ -163,7 +163,7 @@ class MixedPrecisionTrainer:
         self.master_params = self.model_params
         self.param_groups_and_shapes = None
         self.lg_loss_scale = initial_lg_loss_scale
-
+        self.scale = th.cuda.amp.grad_scaler.GradScaler()
         if self.use_fp16:
             self.param_groups_and_shapes = get_param_groups_and_shapes(
                 self.model.named_parameters()
@@ -176,8 +176,7 @@ class MixedPrecisionTrainer:
 
     def backward(self, loss: th.Tensor):
         if self.use_fp16:
-            loss_scale = 2**self.lg_loss_scale
-            (loss * loss_scale).backward()
+            self.scale(loss).backward()
         else:
             loss.backward()
 
@@ -190,34 +189,14 @@ class MixedPrecisionTrainer:
     def _optimize_fp16(self, opt: th.optim.Optimizer):
         logger.logkv_mean("lg_loss_scale", self.lg_loss_scale)
         model_grads_to_master_grads(self.param_groups_and_shapes, self.master_params)
-
-        for p in self.master_params:
-            with th.no_grad():
-                if p.grad is not None:
-                    p.grad.mul_(1/(2**self.lg_loss_scale))
-        clip_grad_norm_(self.master_params,5)
-        for p in self.master_params:
-            with th.no_grad():
-                if p.grad is not None:
-                    p.grad.mul_((2**self.lg_loss_scale))
-
-        grad_norm, param_norm = self._compute_norms(grad_scale=2**self.lg_loss_scale)
-        if check_overflow(grad_norm):
-            self.lg_loss_scale -= 1
-            if self.lg_loss_scale<-20:
-                self.lg_loss_scale = 20
-            logger.log(f"Found NaN, decreased lg_loss_scale to {self.lg_loss_scale}, Rank is {dist.get_rank()}")
-            zero_master_grads(self.master_params)
-            return False
-
+        self.scale.unscale_(opt)
+        grad_norm, param_norm = self._compute_norms(opt)
         logger.logkv_mean("grad_norm", grad_norm)
         logger.logkv_mean("param_norm", param_norm)
-        for p in self.master_params:
-            p.grad.mul_(1.0 / (2**self.lg_loss_scale))
-        opt.step()
+        self.scale.step(opt)
+        self.scale.update()
         zero_master_grads(self.master_params)
         master_params_to_model_params(self.param_groups_and_shapes, self.master_params)
-        self.lg_loss_scale += self.fp16_scale_growth
         return True
 
     def _optimize_normal(self, opt: th.optim.Optimizer):

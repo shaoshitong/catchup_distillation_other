@@ -9,7 +9,7 @@ import os
 import numpy as np
 import torch as th
 import torch.distributed as dist
-# from functools import cache
+from functools import cache
 from mpi4py import MPI
 
 from cm import dist_util, logger
@@ -102,13 +102,18 @@ def main():
                     generator=generator,   
                 )
             else:   
-                sample,_,_ = sample_euler_rect(
-                    denoiser,
-                    x_T,
-                    ts,
-                    N=args.steps,
-                    generator=generator,
-                )
+                import tqdm
+                indices = reversed(ts)
+                dt = -1./args.steps
+                for num,_ii in tqdm(enumerate(indices)):
+                    t = th.ones((args.batch_size,1), device=x_T.device) * _ii / args.steps
+                    d = denoiser(x_T,t.squeeze())
+                    if num!=len(ts)-1:
+                        x_T = x_T + d * dt * (indices[num] - indices[num+1])
+                    else:
+                        x_T = x_T + d * dt * (indices[num] - 0)
+                sample = x_T
+
             pred, spatial_pred, clip_pred, text_pred, _ = fid_is.get_preds(sample)
 
             sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
@@ -145,7 +150,7 @@ def main():
 
         return arr, preds
 
-    # @cache
+    @cache
     def get_fid(p, begin=(0,), end=(args.steps - 1,)):
 
         samples, preds = sample_generator(begin + (p,) + end)
@@ -211,10 +216,36 @@ def main():
         return p
 
     # convert comma separated numbers to tuples
+    import copy
     begin = tuple(int(x) for x in args.begin.split(","))
     end = tuple(int(x) for x in args.end.split(","))
+    optimal_traj_point  = list(begin+end)
+    swap_optimal_traj_point = []
+    number_record = 0
+    while 1:
+        _len = len(optimal_traj_point)-1
+        for i in range(0,_len,2):
+            sub_begin = optimal_traj_point[:i+1]
+            sub_end = optimal_traj_point[i+1:]
+            if isinstance(sub_begin,int):
+                sub_begin = (sub_begin,)
+            if isinstance(sub_end,int):
+                sub_end = (sub_end,)
+            optimal_p = ternary_search(sub_begin,sub_end)
+            optimal_traj_point = sub_begin + (optimal_p,) + sub_end
+            _len = len(optimal_traj_point)-1
+            number_record+=1
+            print(f"After {number_record} times ternary search, the optimal trajectory point is {optimal_traj_point}")
+            if number_record>args.total_number:
+                break
+        if number_record>args.total_number:
+            break
 
-    optimal_p = ternary_search(begin, end)
+    for _iter in range(args.total_number):
+        optimal_p = ternary_search(begin, end)
+
+
+
     if dist.get_rank() == 0:
         logger.log(f"ternary_search_results: {optimal_p}")
         fid, IS = get_fid(optimal_p, begin, end)
@@ -236,6 +267,7 @@ def create_argparser():
         s_tmax=float("inf"),
         s_noise=1.0,
         steps=40,
+        total_number = 16,
         model_path="",
         ref_batch="",
         seed=42,

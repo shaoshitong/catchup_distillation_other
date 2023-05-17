@@ -6,8 +6,9 @@ import blobfile as bf
 from mpi4py import MPI
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-
-
+from torchvision import transforms
+import os
+import glob
 def load_data(
     *,
     data_dir,
@@ -165,3 +166,42 @@ def random_crop_arr(pil_image, image_size, min_crop_frac=0.8, max_crop_frac=1.0)
     crop_y = random.randrange(arr.shape[0] - image_size + 1)
     crop_x = random.randrange(arr.shape[1] - image_size + 1)
     return arr[crop_y : crop_y + image_size, crop_x : crop_x + image_size]
+
+
+
+class DatasetWithTraj(Dataset):
+    def __init__(self, traj_dir_list,latent_dir, input_nc):
+        super().__init__()
+        self.input_nc = input_nc
+        self.traj_dir_list = traj_dir_list
+        self.transforms = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) if input_nc == 3 else transforms.Normalize(mean=[0.5], std=[0.5]),
+        ])
+        self.latent_names = []
+        self.set_traj(0)
+        for im_name in self.img_list:
+            num = im_name.split('/')[-1].split('_')[-1].split('.')[0]
+            latent_name = os.path.join(latent_dir, f'{num}.npy')
+            self.latent_names.append(latent_name)
+        for traj_dir in traj_dir_list:
+            assert os.path.exists(traj_dir), f"{traj_dir} does not exist"
+
+    def set_traj(self,i):
+        self.trag_idx = i
+        img_list = glob.glob(os.path.join(self.traj_dir_list[self.trag_idx], '*.png')) + glob.glob(os.path.join(self.traj_dir_list[self.trag_idx], '*.jpg'))
+        img_list.sort()
+        self.img_list = img_list
+
+    def __len__(self):
+        return len(self.img_list)
+    def __getitem__(self, idx):
+        img = Image.open(self.img_list[idx])
+        if self.input_nc == 1:
+            img = img.convert('L')
+        img = np.array(img)
+        img = self.transforms(img)
+        latent_name = self.latent_names[idx]
+        latent = np.load(latent_name)
+        latent = torch.tensor(latent, dtype=torch.float32)
+        return img,latent

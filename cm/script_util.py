@@ -33,6 +33,7 @@ def model_and_diffusion_defaults():
         sigma_min=0.002,
         sigma_max=80.0,
         image_size=64,
+        total_number = 16,
         num_channels=128,
         num_res_blocks=2,
         num_heads=4,
@@ -162,6 +163,8 @@ def create_model_and_diffusion(
     weight_schedule,
     sigma_min=0.002,
     save_z = False,
+    total_number = 16,
+    karra = True,
     sigma_max=80.0,
     catchingup = False,
     predstep = 1,
@@ -194,7 +197,7 @@ def create_model_and_diffusion(
         phi = phi,
     )
         
-    if catchingup:
+    if not karra:
         diffusion = RectifiedDenoiser(
             device=dist_util.dev(),
             num_steps=num_steps,
@@ -209,6 +212,8 @@ def create_model_and_diffusion(
             sigma_min=sigma_min,
             distillation=distillation,
             weight_schedule=weight_schedule,
+            predstep = predstep,
+            TN = TN,
         )
     return model, diffusion
 

@@ -22,11 +22,72 @@ from cm.random_util import get_generator
 from cm.karras_diffusion import karras_sample, rectified_sample
 from torchvision.utils import save_image
 """
- mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 32 --training_mode catchingup_distillation --sampler euler \
- --model_path /home/Bigdata/ode_flow_runs/ema_0.999_162000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 32  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 32
+ CUDA_VISIBLE_DEVICES=0 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999432189950708_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
+
+  CUDA_VISIBLE_DEVICES=1 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
+
+   CUDA_VISIBLE_DEVICES=2 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
+
+ 
+
+ CUDA_VISIBLE_DEVICES=4 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999432189950708_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 4
+
+ CUDA_VISIBLE_DEVICES=6 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 8
+
+CUDA_VISIBLE_DEVICES=6 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
+
+ CUDA_VISIBLE_DEVICES=7 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 32
+
+
+ 
+CUDA_VISIBLE_DEVICES=0 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler heun \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 7
+
+
+
+CUDA_VISIBLE_DEVICES=3 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler heun \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 4
+
+CUDA_VISIBLE_DEVICES=7 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler heun \
+ --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.999_166000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 4
+
 """
 def main():
     args = create_argparser().parse_args()
@@ -67,7 +128,10 @@ def main():
     all_images = []
     all_labels = []
     all_noises = []
-    all_x0hat_images = [[] for i in range(args.steps)]
+    if args.sampler == "heun":
+        all_x0hat_images = [[] for i in range((args.steps+1)//2)]
+    else:
+        all_x0hat_images = [[] for i in range(args.steps)]
     generator = get_generator(args.generator, args.num_samples, args.seed)
 
     while len(all_images) * args.batch_size < args.num_samples:
@@ -90,6 +154,9 @@ def main():
                 generator_id=args.generator_id,
                 generator=generator,
             )
+            save_image(sample[:64]*0.5+0.5,"test.png",nrow=8)
+            # for _ii,x0hat in enumerate(x0hat_list):
+            #     save_image(x0hat[:64]*0.5+0.5,f"test_4_x0hat_{_ii}.png",nrow=8)
 
         else:
             sample = karras_sample(
@@ -118,16 +185,17 @@ def main():
             gathered_noise = [th.zeros_like(noise) for _ in range(dist.get_world_size())]
             dist.all_gather(gathered_noise, noise)  # gather not supported with NCCL
             all_noises.extend([noise.cpu().numpy() for noise in gathered_noise])
-
-            for _ in range(args.steps):
+            print(len(x0hat_list))
+            for _ in range(len(x0hat_list)):
                 x0hat_list[_] = x0hat_list[_].contiguous()
                 gather_x0hat = [th.zeros_like(x0hat_list[_]) for _ in range(dist.get_world_size())]
                 dist.all_gather(gather_x0hat, x0hat_list[_])  # gather not supported with NCCL
                 all_x0hat_images[_].extend([x0hat.cpu().numpy() for x0hat in gather_x0hat])
 
-        gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+        # gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
+        # dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
+        # all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
+        all_images.extend([sample.cpu().numpy()])
         if args.class_cond:
             gathered_labels = [
                 th.zeros_like(classes) for _ in range(dist.get_world_size())
@@ -143,10 +211,12 @@ def main():
         arr_noise = np.concatenate(all_noises, axis=0)
         arr_noise = arr_noise[:args.num_samples]
         arr_x0hat_list = []
-        for _ in range(args.steps):
+        for _ in range(len(all_x0hat_images)):
             arr_x0hat = np.concatenate(all_x0hat_images[_], axis=0)[:args.num_samples]
             arr_x0hat_list.append(arr_x0hat)
-        arr_x0hat_list = np.concatenate(arr_x0hat_list, axis=0)
+        arr_x0hat_list = np.stack(arr_x0hat_list, axis=0)
+        print(arr_x0hat_list.shape)
+        arr_x0hat_list = np.stack([arr_x0hat_list[-4],arr_x0hat_list[-3],arr_x0hat_list[-2],arr_x0hat_list[-1]],axis=0)
 
     if args.class_cond:
         label_arr = np.concatenate(all_labels, axis=0)
@@ -186,7 +256,7 @@ def create_argparser():
         steps=40,
         model_path="",
         save_z=False,
-        seed=0,
+        seed=42,
         ts="",
     )
     defaults.update(model_and_diffusion_defaults())

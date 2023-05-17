@@ -29,6 +29,8 @@ def main():
     parser.add_argument("ref_batch", help="path to reference batch npz file")
     parser.add_argument("sample_batch", help="path to sample batch npz file")
     args = parser.parse_args()
+    physical_devices = tf.config.list_physical_devices('GPU')
+    tf.config.experimental.set_memory_growth(physical_devices[0], enable=True)
 
     config = tf.ConfigProto(
         allow_soft_placement=True  # allows DecodeJpeg to run on CPU in Inception graph
@@ -142,6 +144,14 @@ class Evaluator:
     def read_activations(self, npz_path: str) -> Tuple[np.ndarray, np.ndarray]:
         with open_npz_array(npz_path, "arr_0") as reader:
             return self.compute_activations(reader.read_batches(self.batch_size))
+
+    def read_activations_new(self, npz_path: str) -> Tuple[np.ndarray, np.ndarray]:
+        with open_npz_array(npz_path, "arr_3") as reader:
+            reader.arr = reader.arr[-3]
+            reader.arr = np.clip(((reader.arr + 1) * 127.5),0, 255).astype(np.uint8)
+            reader.arr = reader.arr.transpose((0, 2, 3, 1))
+            return self.compute_activations(reader.read_batches(self.batch_size))
+
 
     def compute_activations(
         self, batches: Iterable[np.ndarray]
@@ -541,18 +551,19 @@ class MemoryNpzArrayReader(NpzArrayReader):
 def open_npz_array(path: str, arr_name: str) -> NpzArrayReader:
     with _open_npy_file(path, arr_name) as arr_f:
         version = np.lib.format.read_magic(arr_f)
-        if version == (1, 0):
-            header = np.lib.format.read_array_header_1_0(arr_f)
-        elif version == (2, 0):
-            header = np.lib.format.read_array_header_2_0(arr_f)
-        else:
-            yield MemoryNpzArrayReader.load(path, arr_name)
-            return
-        shape, fortran, dtype = header
-        if fortran or dtype.hasobject:
-            yield MemoryNpzArrayReader.load(path, arr_name)
-        else:
-            yield StreamingNpzArrayReader(arr_f, shape, dtype)
+        yield MemoryNpzArrayReader.load(path, arr_name)
+        # if version == (1, 0):
+        #     header = np.lib.format.read_array_header_1_0(arr_f)
+        # elif version == (2, 0):
+        #     header = np.lib.format.read_array_header_2_0(arr_f)
+        # else:
+        #     yield MemoryNpzArrayReader.load(path, arr_name)
+        #     return
+        # shape, fortran, dtype = header
+        # if fortran or dtype.hasobject:
+        #     yield MemoryNpzArrayReader.load(path, arr_name)
+        # else:
+        #     yield StreamingNpzArrayReader(arr_f, shape, dtype)
 
 
 def _read_bytes(fp, size, error_template="ran out of data"):

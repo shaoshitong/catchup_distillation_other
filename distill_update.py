@@ -57,7 +57,6 @@ def main():
         distill_steps_per_iter=args.distill_steps_per_iter,
     )
     catchingup = False
-    karra = False
     if args.training_mode == "progdist":
         distillation = False
     elif "consistency" in args.training_mode:
@@ -65,10 +64,6 @@ def main():
     elif "catchingup" in args.training_mode:
         catchingup = True
         distillation = True
-        if "karra" in args.training_mode:
-            karra = True
-        else:
-            karra = False
     else:
         raise ValueError(f"unknown training mode {args.training_mode}")
 
@@ -77,7 +72,6 @@ def main():
     )
     model_and_diffusion_kwargs["distillation"] = distillation
     model_and_diffusion_kwargs["catchingup"] = catchingup
-    model_and_diffusion_kwargs["karra"] = karra
     model, diffusion = create_model_and_diffusion(**model_and_diffusion_kwargs)
     print("After Compling ......")
     if catchingup:
@@ -90,9 +84,12 @@ def main():
             forward_model.encoder.convert_to_fp16()
     else:
         forward_model = None
-
+    model.load_state_dict(
+        dist_util.load_state_dict(args.model_path, map_location="cpu")
+    )
     model.to(dist_util.dev())
     model.train()
+
     if args.use_fp16:
         model.convert_to_fp16()
 
@@ -205,6 +202,7 @@ def create_argparser():
         log_interval=10,
         save_interval=2000,
         resume_checkpoint="",
+        model_path = "",
         use_fp16=False,
         fp16_scale_growth=1e-3,
         catchingup = False,
