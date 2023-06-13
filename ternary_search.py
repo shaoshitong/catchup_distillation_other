@@ -5,24 +5,19 @@ numpy array. This can be used to produce samples for FID evaluation.
 
 import argparse
 import os
+from functools import cache
 
 import numpy as np
 import torch as th
 import torch.distributed as dist
-from functools import cache
-from mpi4py import MPI
-
 from cm import dist_util, logger
-from cm.script_util import (
-    NUM_CLASSES,
-    model_and_diffusion_defaults,
-    create_model_and_diffusion,
-    add_dict_to_argparser,
-    args_to_dict,
-)
+from cm.karras_diffusion import sample_euler_rect, stochastic_iterative_sampler
 from cm.random_util import get_generator
-from cm.karras_diffusion import stochastic_iterative_sampler,sample_euler_rect
+from cm.script_util import (NUM_CLASSES, add_dict_to_argparser, args_to_dict,
+                            create_model_and_diffusion,
+                            model_and_diffusion_defaults)
 from evaluations.th_evaluator import FIDAndIS
+from mpi4py import MPI
 
 
 def main():

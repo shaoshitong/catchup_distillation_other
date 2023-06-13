@@ -3,23 +3,18 @@ Train a diffusion model on images.
 """
 
 import argparse
+import copy
 
+import torch.distributed as dist
 from cm import dist_util, logger
 from cm.image_datasets import load_data
 from cm.resample import create_named_schedule_sampler
-from cm.script_util import (
-    model_and_diffusion_defaults,
-    forward_model_defaults,
-    create_model_and_diffusion,
-    create_forward_model,
-    cm_train_defaults,
-    args_to_dict,
-    add_dict_to_argparser,
-    create_ema_and_scales_fn,
-)
+from cm.script_util import (add_dict_to_argparser, args_to_dict,
+                            cm_train_defaults, create_ema_and_scales_fn,
+                            create_forward_model, create_model_and_diffusion,
+                            forward_model_defaults,
+                            model_and_diffusion_defaults)
 from cm.train_util import CMTrainLoop
-import torch.distributed as dist
-import copy
 
 """
 mpiexec -n 2 python cm_train.py --training_mode consistency_distillation --target_ema_mode fixed \
@@ -32,13 +27,13 @@ mpiexec -n 2 python cm_train.py --training_mode consistency_distillation --targe
     --predstep 1 --adapt-cu uniform --TN 16
 
 mpiexec --allow-run-as-root -n 8 python cm_train.py --training_mode catchingup_distillation \
-    --target_ema_mode fixed --start_ema 0.95 --scale_mode fixed --start_scales 40 \
+    --target_ema_mode fixed --start_ema 0.95 --scale_mode fixed --start_scales 80 \
     --total_training_steps 1200000 --loss_norm l2 --lr_anneal_steps 0 \
     --attention_resolutions 32,16,8 --class_cond True --use_scale_shift_norm True --dropout 0.1 \
-    --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 1024 --image_size 64 --lr 0.00015 --num_channels 192 \
+    --ema_rate 0.999,0.9999,0.9999432189950708 --global_batch_size 1024 --image_size 64 --lr 0.0004 --num_channels 192 \
     --num_head_channels 64 --num_res_blocks 3 --resblock_updown True --schedule_sampler uniform --use_fp16 True --weight_decay 0.0 \
     --weight_schedule uniform --data_dir /home/imagenet/train \
-    --predstep 1 --adapt_cu uniform --TN 16 --resume_checkpoint /tmp/checkpoint/model064000.pt
+    --predstep 1 --adapt_cu uniform --TN 16 --resume /tmp/rectified_flow/ema_0.9999_166000.pt --prior_shakedrop True
 """
 def main():
     args = create_argparser().parse_args()
@@ -203,7 +198,7 @@ def create_argparser():
         microbatch=-1,  # -1 disables microbatches
         ema_rate="0.9999",  # comma-separated list of EMA values
         log_interval=10,
-        save_interval=2000,
+        save_interval=2500,
         resume_checkpoint="",
         use_fp16=False,
         fp16_scale_growth=1e-3,

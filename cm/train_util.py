@@ -3,23 +3,19 @@ import functools
 import os
 
 import blobfile as bf
+import numpy as np
 import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
-from torch.optim import RAdam
+from torch.nn.utils import clip_grad_norm_
+from torch.optim import Adam, RAdam
 
 from . import dist_util, logger
-from .fp16_util import MixedPrecisionTrainer
+from .fp16_util import (MixedPrecisionTrainer, get_param_groups_and_shapes,
+                        make_master_params, master_params_to_model_params)
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
 
-from .fp16_util import (
-    get_param_groups_and_shapes,
-    make_master_params,
-    master_params_to_model_params,
-)
-import numpy as np
-from torch.nn.utils import clip_grad_norm_
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
 # 20-21 within the first ~1K steps of training.
@@ -65,7 +61,6 @@ class TrainLoop:
         self.schedule_sampler = schedule_sampler or UniformSampler(diffusion)
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
-
         self.step = 0
         self.resume_step = 0
         self.global_batch = self.batch_size * dist.get_world_size()
@@ -79,7 +74,7 @@ class TrainLoop:
             fp16_scale_growth=fp16_scale_growth,
         )
 
-        self.opt = RAdam(
+        self.opt = Adam(
             self.mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay
         )
         if self.resume_step:
@@ -285,7 +280,7 @@ class CMTrainLoop(TrainLoop):
         self.teacher_diffusion = teacher_diffusion
         self.total_training_steps = total_training_steps
         self.independent = independent
-
+        self.estimate_velocity = True
         if target_model:
             self._load_and_sync_target_parameters()
             self.target_model.requires_grad_(False)
@@ -308,9 +303,11 @@ class CMTrainLoop(TrainLoop):
             self.forward_mp_trainer = MixedPrecisionTrainer(
                 model=self.forward_model,
                 use_fp16=self.use_fp16,
-                fp16_scale_growth=self.fp16_scale_growth
+                fp16_scale_growth=self.fp16_scale_growth,
+                if_apply_for_forward=True
             )
-            self.forward_opt = RAdam(self.forward_mp_trainer.master_params, lr=self.lr, weight_decay=self.weight_decay)
+            # self.forward_mp_trainer.scale = self.mp_trainer.scale
+            self.forward_opt = Adam(self.forward_mp_trainer.master_params, lr=self.lr, weight_decay=1e-2)
             if self.resume_step:
                 self._load_forward_optimizer_state()
             if th.cuda.is_available():
@@ -519,7 +516,6 @@ class CMTrainLoop(TrainLoop):
             }
             last_batch = (i + self.microbatch) >= batch.shape[0]
             t, weights = self.schedule_sampler.sample(micro.shape[0], dist_util.dev())
-
             ema, num_scales = self.ema_scale_fn(self.global_step)
             if self.training_mode == "progdist":
                 if num_scales == self.ema_scale_fn(0)[1]:
@@ -573,7 +569,7 @@ class CMTrainLoop(TrainLoop):
                     noise = None,
                     model_kwargs=micro_cond,
                 )
-            elif self.training_mode == "catchingup_distillation_with_karra":
+            elif self.training_mode == "catchingup_distillation_with_karras":
                 compute_losses = functools.partial(
                     self.diffusion.catchupdist_loss,
                     self.ddp_model,
@@ -582,6 +578,8 @@ class CMTrainLoop(TrainLoop):
                     num_scales,
                     noise = None,
                     model_kwargs=micro_cond,
+                    estimate_velocity = self.estimate_velocity,
+                    params = (self.mp_trainer.master_params,self.ema_params[1]) ,
                 )
             else:
                 raise ValueError(f"Unknown training mode {self.training_mode}")
@@ -600,7 +598,6 @@ class CMTrainLoop(TrainLoop):
                 self.schedule_sampler.update_with_local_losses(
                     t, losses["loss"].detach()
                 )
-
             loss = (losses["loss"] * weights).mean()
 
             log_loss_dict(

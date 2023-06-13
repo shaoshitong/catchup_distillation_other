@@ -1,9 +1,12 @@
-from torch import nn
+import numpy as np
 import torch
 import torch.nn.functional as F
-from .unet import UNetModel
 from einops import rearrange
-import numpy as np
+from torch import nn
+
+from .unet import UNetModel
+
+
 class AE(nn.Module):
     def __init__(self, input_dim, z_dim, num_layers=2, channels=128):
         super().__init__()
@@ -119,7 +122,6 @@ class UNetAE(nn.Module):
             if not encoder_only:
                 self.decoder = UNetModel(res, input_nc, 32, input_nc, no_time = True)
 
-
     def forward(self, x):
         z, mu, logvar = self.encode(x)
         x_recon = self.decode(z)
@@ -132,6 +134,7 @@ class UNetAE(nn.Module):
     def decode(self, z):
         x_recon = self.decoder(z)
         return x_recon
+    
 class UNetEncoder(nn.Module):
     def __init__(self, encoder, input_nc=3):
         super().__init__()
@@ -156,8 +159,6 @@ class UNetEncoder(nn.Module):
         mu, logvar = mu_logvar[:, :self.input_nc], mu_logvar[:, self.input_nc:]
         z = mu + noise*torch.exp(logvar/2)
         return z, mu, logvar
-
-
 
 class FourierMLP(nn.Module):
     def __init__(self, input_dim=2, output_dim = 2, num_layers=2, channels=128):

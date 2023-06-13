@@ -1,21 +1,27 @@
 """
 Based on: https://github.com/crowsonkb/k-diffusion
 """
+import os
 import random
 
 import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as cp
 from piq import LPIPS
+from pytorch_wavelets import DWTForward, DWTInverse  # (or import DWT, IDWT)
 from torchvision.transforms import RandomCrop
+from torchvision.utils import make_grid, save_image
+
 from . import dist_util
-from .flows import OnlineSlimFlow
-from .nn import mean_flat, append_dims, append_zero
+from .flows import CatchUpFlow
+from .nn import append_dims, append_zero, mean_flat
 from .random_util import get_generator
-from torchvision.utils import save_image, make_grid
-import os
+
+NUM_CLASSES = 1000
 from mpi4py import MPI
+
 
 def get_weightings(weight_schedule, snrs, sigma_data):
     if weight_schedule == "snr":
@@ -43,7 +49,6 @@ class RectifiedDenoiser:
         predstep=1):
         self.sam = False
         self.N = num_steps
-        self.device = device
         assert adapt_cu in ["origin","rule","uniform"],"adapt_cu must be one of 'origin','rule','uniform'."
         self.adapt_cu = adapt_cu
         self.discrete = False
@@ -52,15 +57,18 @@ class RectifiedDenoiser:
         self.predstep = predstep
         self.eps = 1e-5
         self.num_timesteps = TN
-        self.iteration = 74000
+        self.iteration = 227500
+        self.begin_iteration = self.iteration
+        self.dwt = DWTForward(J=3, mode='zero', wave='db3').cuda()
+        self.dwt.requires_grad_(False)
         self.test_dir = "./test"
         if not os.path.exists(self.test_dir):
             os.makedirs(self.test_dir)
-        self.cudflow = lambda model,ema_model : OnlineSlimFlow(
+
+        self.cudflow = lambda model,ema_model : CatchUpFlow(
             device=device,
             model = model,
             ema_model=ema_model,
-            predstep=predstep,
             num_steps=num_steps,
             TN = self.TN,
             adapt_cu=adapt_cu,
@@ -79,6 +87,7 @@ class RectifiedDenoiser:
         model_kwargs=None,    
     ):
         flow_model_fn = lambda x,t,return_features=False:flow_model(x,t,return_features=return_features,**model_kwargs)
+        dwt_fn = lambda x:cp.checkpoint(lambda y:self.dwt(y)[1][0],x*0.5+0.5)
         cudflow = self.cudflow(flow_model_fn, ema_model)
         if model_kwargs is None:
             model_kwargs = {}
@@ -94,9 +103,9 @@ class RectifiedDenoiser:
                 z = th.randn_like(x_start)
                 loss_prior = 0
             else:
-                assert forward_model is not None, "forward_model must be provided when independint is False."
-                z, mu, logvar = forward_model(x_start, th.ones((x_start.shape[0]), device=self.device))
-                loss_prior = get_kl(mu, logvar)
+                z = th.randn_like(x_start)
+                loss_prior = 0
+                print("The module was introduced with poor performance and was discarded")
         else:
             z = noise
         z = z.type_as(x_start)
@@ -120,15 +129,37 @@ class RectifiedDenoiser:
                 _loss = round(_loss.detach().clone().item(),2)
         else:
             raise NotImplementedError
-        loss_fm = loss_fm.mean()
-        loss = loss_fm + 5 * loss_prior
         comm = MPI.COMM_WORLD
-        if comm.Get_rank() == 0 and self.iteration%2000==0:
+        pred_dwt = dwt_fn(z-pred_z_t)
+        gt_dwt = dwt_fn(z-gt_z_t)
+        diff_dwt = (pred_dwt-gt_dwt).abs()
+        diff_dwt = th.sort(diff_dwt.view(diff_dwt.shape[0],-1),-1,descending=True)[0]
+        _len = int(diff_dwt.shape[-1] * 0.2)
+
+        loss_dwt = diff_dwt[:,:_len].mean()
+        if comm.Get_rank() == 0 and self.iteration%500==0:
             save_image(x_start[:16]*0.5+0.5,os.path.join(self.test_dir,f"x_start_{self.iteration}.png"), nrow=4)
-            save_image((z[:16] - pred_z_t[:16])*0.5+0.5,os.path.join(self.test_dir,f"one_step_{self.iteration}.png"), nrow=4)
+            begin_z = th.randn(16,3,z.shape[2],z.shape[3]).to(self.device)
+            classes = th.randint(low=0, high=NUM_CLASSES, size=(16,), device=dist_util.dev())
+            end_x,_,_= sample_euler_rect(
+                lambda x_t,sigma:self.denoise(flow_model,x_t,sigma,y=classes),
+                begin_z,
+                64,
+                64,
+                True
+            )
+            save_image(end_x*0.5+0.5,os.path.join(self.test_dir,f"euler_16_{self.iteration}.png"), nrow=4)
+            save_image(gt_dwt[:16,:,0,:,:],os.path.join(self.test_dir,f"dwt_gt_{self.iteration}.png"), nrow=4)
+            save_image(pred_dwt[:16,:,0,:,:],os.path.join(self.test_dir,f"dwt_pred_{self.iteration}.png"), nrow=4)
         self.iteration +=1
         terms = {}
+        loss_fm = loss_fm.mean()
+        terms["loss_fm"] = loss_fm
+        terms["loss_prior"] = loss_prior * 20
+        terms["loss_dwt"] = loss_dwt
+        loss = terms["loss_fm"] + terms["loss_prior"] + terms["loss_dwt"]
         terms["loss"] = loss
+
         return terms
 
     def denoise(self,model, x_t, sigma, **model_kwargs):
@@ -148,6 +179,9 @@ class KarrasDenoiser:
         distillation=False,
         loss_norm="lpips",
     ):
+        self.iteration = 225000
+        self.begin_iteration = 0
+        self.end_iteration = 300000
         self.sigma_data = sigma_data
         self.sigma_max = sigma_max
         self.sigma_min = sigma_min
@@ -156,10 +190,13 @@ class KarrasDenoiser:
         self.weight_schedule = weight_schedule
         self.distillation = distillation
         self.loss_norm = loss_norm
-        if loss_norm == "lpips":
-            self.lpips_loss = LPIPS(replace_pooling=True, reduction="none")
+        self.lpips_loss = LPIPS(replace_pooling=True, reduction="none")
         self.rho = rho
         self.num_timesteps = 40
+        self.test_dir = "./test"
+        print("Weight Schedule: ", self.weight_schedule)
+        if not os.path.exists(self.test_dir):
+            os.makedirs(self.test_dir)
 
     def get_snr(self, sigmas):
         return sigmas**-2
@@ -226,7 +263,6 @@ class KarrasDenoiser:
             model_kwargs = {}
         if noise is None:
             noise = th.randn_like(x_start)
-    
         dims = x_start.ndim
 
         def denoise_fn(x, t):
@@ -438,10 +474,10 @@ class KarrasDenoiser:
 
         return terms
 
-    def catchupdist_loss(self, model, forward_model, x_start, num_scales, model_kwargs=None, noise=None):
+    def catchupdist_loss(self, model, forward_model, x_start, num_scales, t=None, model_kwargs=None, noise=None,estimate_velocity=False,params=None):
         if model_kwargs is None:
             model_kwargs = {}
-
+        num_scales = num_scales #max(480,int((self.iteration - self.begin_iteration)*(480 - num_scales)/(self.end_iteration - self.begin_iteration) + num_scales))
         if noise is None:
             def get_kl(mu, logvar):
                 # Return KL divergence between N(mu, var) and N(0, 1), divided by data dimension.
@@ -449,46 +485,51 @@ class KarrasDenoiser:
                 _loss_prior = th.mean(kl) / (mu.shape[1]*mu.shape[2]*mu.shape[3])
                 return _loss_prior
             assert forward_model is not None, "forward_model must be provided when independint is False."
-            noise, mu, logvar = forward_model(x_start, th.ones((x_start.shape[0]), device=self.device))
-            loss_prior = get_kl(mu, logvar)
+            noise, mu, logvar = forward_model(x_start, th.ones((x_start.shape[0]), device=x_start.device))
+            loss_prior = get_kl(mu, logvar) * 20
 
+        noise = th.randn_like(x_start)
         terms = {}
         dims = x_start.ndim
         indices = th.randint(
-            0, num_scales - 1, (x_start.shape[0],), device=x_start.device
-        )
-
-        t = self.sigma_max ** (1 / self.rho) + indices / (num_scales - 1) * (
+        0, num_scales, (x_start.shape[0],), device=x_start.device
+        ).float()
+        t =th.exp(th.randn_like(indices)*1.2-1.2)
+        t_tmp = self.sigma_max ** (1 / self.rho) + indices / (num_scales - 1) * (
             self.sigma_min ** (1 / self.rho) - self.sigma_max ** (1 / self.rho)
         )
-        t = t**self.rho
-
+        t = th.where(th.rand_like(t)>0.8,t_tmp,t)
+        def intervate_rho(t):
+            return (t**(1/self.rho) - self.sigma_max**(1/self.rho))/(self.sigma_min ** (1 / self.rho) - self.sigma_max ** (1 / self.rho))
+        inter_t = intervate_rho(t)
 
         x_t = x_start + noise * append_dims(t, dims)
         model_output, denoised = self.denoise(model, x_t, t, predstep=self.predstep, **model_kwargs)
         pred_v = denoised
-        gt_v = x_start
+        gt_v = x_start if not estimate_velocity else noise - x_start
         snrs = self.get_snr(t)
         catchingup_size = int(num_scales/self.TN)
         catchingup_size = th.randint(
             1, catchingup_size+1, (x_start.shape[0],), device=x_start.device
         )
-        catchingup_size = th.where(indices+catchingup_size>num_scales-1, num_scales-1-indices, catchingup_size)
-        t2 = self.sigma_max ** (1 / self.rho) + (indices + catchingup_size) / (num_scales - 1) * (
+        inter_t = inter_t + catchingup_size/num_scales
+        inter_t[inter_t<0] = 0
+        inter_t[inter_t>1] = 1
+
+        t2 = self.sigma_max ** (1 / self.rho) + inter_t * (
             self.sigma_min ** (1 / self.rho) - self.sigma_max ** (1 / self.rho)
         )
         t2 = t2**self.rho
-
 
         @th.no_grad()
         def rk34_solver(samples, t, next_t, x0):
             x = samples
             h = t - next_t
-            denoiser_1 = self.denoise(x, t,**model_kwargs)
-            d = (x - denoiser_1) / append_dims(t, dims)
+            denoiser_1 = self.denoise(model,x, t,**model_kwargs)[1]
+            d = (x - denoiser_1) / append_dims(t, dims) if not estimate_velocity else (denoiser_1+x)/ append_dims(1+t, dims)
             samples = x - d * append_dims(h, dims)
-            denoiser_2 = self.denoise(samples, next_t,**model_kwargs)
-            next_d = (samples - denoiser_2) / append_dims(next_t, dims)
+            denoiser_2 = self.denoise(model,samples, next_t,**model_kwargs)[1]
+            next_d = (samples - denoiser_2) / append_dims(next_t, dims)  if not estimate_velocity else (denoiser_2+x)/ append_dims(1+t, dims)
             next_next_t = t-2*h
             next_next_t = t-3*h
             thresbold = self.sigma_min
@@ -496,12 +537,12 @@ class KarrasDenoiser:
             next_next_t = th.where(next_next_t<thresbold, thresbold, next_next_t)
             next_next_next_t = th.where(next_next_next_t<thresbold, thresbold, next_next_t)
             samples = x-(7*h*d/4+1*h*next_d/4)
-            denoise_3 = self.denoise(samples,next_next_t,**model_kwargs)
-            next_next_d = (samples - denoise_3) / append_dims(next_next_t, dims)
+            denoiser_3 = self.denoise(model,samples,next_next_t,**model_kwargs)[1]
+            next_next_d = (samples - denoiser_3) / append_dims(next_next_t, dims)  if not estimate_velocity else (denoiser_3+x)/ append_dims(1+t, dims)
             samples1 = x - h*((5/12)*d+(2/3)*next_d-(1/12)*next_next_d)
             samples2 = x - 2*h*((5/12)*d+(2/3)*next_d-(1/12)*next_next_d)
             samples3 = x - 3*h*((5/12)*d+(2/3)*next_d-(1/12)*next_next_d)
-            return self.denoise(samples1, next_t,**model_kwargs),self.denoise(samples2, next_next_t,**model_kwargs),self.denoise(samples3, next_next_next_t,**model_kwargs)
+            return self.denoise(model,samples1, next_t,**model_kwargs)[1],self.denoise(model,samples2, next_next_t,**model_kwargs)[1],self.denoise(model,samples3, next_next_next_t,**model_kwargs)[1]
         
 
         @th.no_grad()
@@ -512,50 +553,80 @@ class KarrasDenoiser:
             thresbold = self.sigma_min
             
             next_next_t = th.where(next_next_t<thresbold, thresbold, next_next_t)
-            denoiser = self.denoise(x, t,**model_kwargs)
-            d = (x - denoiser) / append_dims(t, dims)
+            denoiser = self.denoise(model,x, t,**model_kwargs)[1]
+            d = (x - denoiser) / append_dims(t, dims)   if not estimate_velocity else (denoiser.clone()+x)/ append_dims(1+t, dims)
             samples = x - d * append_dims(t-next_t, dims)
-            denoiser = self.denoise(samples, next_t,**model_kwargs)
-            next_d = (samples - denoiser) / append_dims(next_t, dims)
+            denoiser = self.denoise(model,samples, next_t,**model_kwargs)[1]
+            next_d = (samples - denoiser) / append_dims(next_t, dims) if not estimate_velocity else (denoiser.clone()+x)/ append_dims(1+t, dims)
             samples1 = x + ((d + next_d) / 2)* append_dims((next_t - t), dims)
             samples2 = x + (d + next_d)*append_dims((next_t - t), dims)
-            return self.denoise(samples1,next_t,**model_kwargs),self.denoise(samples2,next_next_t,**model_kwargs)
+            return self.denoise(model,samples1,next_t,**model_kwargs)[1],self.denoise(model,samples2,next_next_t,**model_kwargs)[1]
 
         @th.no_grad()
         def rk12_solver(samples, t, next_t, x0):
             x = samples
-            denoiser = self.denoise(x, t,**model_kwargs)
-            d = (x - denoiser) / append_dims(t, dims)
+            denoiser = self.denoise(model, x, t,**model_kwargs)[1]
+            d = (x - denoiser) / append_dims(t, dims) if not estimate_velocity else (denoiser+x)/ append_dims(1+t, dims)
             samples = x - d * append_dims(t-next_t, dims)
-            return self.denoise(samples, next_t,**model_kwargs)
+            return self.denoise(model, samples, next_t,**model_kwargs)[1]
         
         if self.predstep == 1:
-            ema_v1 = rk12_solver(pred_v[0] if isinstance(pred_v,list) else pred_v, t, t2, x_start)
+            ema_v1 = rk12_solver(x_t, t, t2, x_start)
+            ema_v1[t2 == t] = gt_v[t2 == t]
         elif self.predstep == 2:
-            ema_v1,ema_v2 = rk23_solver(pred_v[0] if isinstance(pred_v,list) else pred_v, t, t2, x_start)
+            ema_v1,ema_v2 = rk23_solver(x_t, t, t2, x_start)
+            ema_v1[t2 == t] = gt_v[t2 == t]
+            ema_v2[t2 == t] = gt_v[t2 == t]
         elif self.predstep == 3:
-            ema_v1,ema_v2,ema_v3 = rk34_solver(pred_v[0] if isinstance(pred_v,list) else pred_v, t, t2, x_start)
+            ema_v1,ema_v2,ema_v3 = rk34_solver(x_t, t, t2, x_start)
+            ema_v1[t2 == t] = gt_v[t2 == t]
+            ema_v2[t2 == t] = gt_v[t2 == t]
+            ema_v3[t2 == t] = gt_v[t2 == t]
         else:
             raise ValueError(f"Unknown predstep {self.predstep}")
         
-        weights = append_dims(
+        weights = th.clip(append_dims(
             get_weightings(self.weight_schedule, snrs, self.sigma_data), dims
-        )
+        ),0,10) # /5442.275898
         if self.predstep==1:
             terms["xs_ori"] = mean_flat((pred_v - gt_v) ** 2)
             terms["ori"] = mean_flat(weights * (pred_v - gt_v) ** 2)
-            terms["prior"] = loss_prior
-            terms["kd"] = mean_flat((pred_v - ema_v1) ** 2)
+            terms["prior"] = loss_prior.mean()
+            terms["kd"] = mean_flat((pred_v - ema_v1) ** 2) * weights.mean()
         elif self.predstep==2:
-            terms["xs_ori"] = mean_flat((pred_v[0] - gt_v) ** 2)+ mean_flat((pred_v[1] - gt_v) ** 2)
+            terms["xs_ori"] = mean_flat((pred_v[0] - gt_v) ** 2) + mean_flat((pred_v[1] - gt_v) ** 2)
             terms["ori"] =mean_flat(weights*(pred_v[0] - gt_v) ** 2)+ mean_flat(weights*(pred_v[1] - gt_v) ** 2)
-            terms["prior"] = loss_prior
-            terms["kd"] = mean_flat((pred_v[0] - ema_v1) ** 2) + mean_flat((pred_v[1] - ema_v2) ** 2)
-        elif self.predstep==2:
-            terms["xs_ori"] = mean_flat((pred_v[0] - gt_v) ** 2)+ mean_flat((pred_v[1] - gt_v) ** 2) + mean_flat((pred_v[2] - gt_v) ** 2)
-            terms["ori"] = mean_flat(weights*(pred_v[0] - gt_v) ** 2)+ mean_flat(weights*(pred_v[1] - gt_v) ** 2) +  mean_flat(weights*(pred_v[2] - gt_v) ** 2)
-            terms["prior"] = loss_prior
-            terms["kd"] = mean_flat((pred_v[0] - ema_v1) ** 2) + mean_flat((pred_v[1] - ema_v2) ** 2) + mean_flat((pred_v[2] - ema_v3) ** 2)
+            terms["prior"] = loss_prior.mean()
+            terms["kd"] = mean_flat((pred_v[0] - ema_v1) ** 2) * weights.mean() + mean_flat((pred_v[1] - ema_v2) ** 2) * weights.mean()
+        elif self.predstep==3:
+            terms["xs_ori"] = mean_flat((pred_v[0] - gt_v) ** 2) + mean_flat((pred_v[1] - gt_v) ** 2)  + mean_flat((pred_v[2] - gt_v) ** 2)
+            terms["ori"] = mean_flat(weights*(pred_v[0] - gt_v) ** 2) + mean_flat(weights*(pred_v[1] - gt_v) ** 2) +  mean_flat(weights*(pred_v[2] - gt_v) ** 2)
+            terms["prior"] = loss_prior.mean()
+            terms["kd"] = mean_flat((pred_v[0] - ema_v1) ** 2)* weights.mean()  + mean_flat((pred_v[1] - ema_v2) ** 2)* weights.mean() + mean_flat((pred_v[2] - ema_v3) ** 2)* weights.mean()
+
+        comm = MPI.COMM_WORLD
+        if comm.Get_rank() == 0 and self.iteration%500==0:
+            with th.no_grad():
+                classes = th.randint(low=0, high=NUM_CLASSES, size=(16,), device=dist_util.dev())
+                print(num_scales,weights.mean())
+                _sample = karras_sample(
+                        self,
+                        model,
+                        (16,3,pred_v.shape[2],pred_v.shape[3]),
+                        16,
+                        False,
+                        sigma_min=0.2,
+                        sigma_max=80,  # higher for highres?
+                        rho=7.0,
+                        device=dist_util.dev(),
+                        sampler="euler",
+                        model_kwargs={"y":classes},
+                        estimate_velocity=estimate_velocity)
+                save_image(ema_v1[:16]*0.5+0.5,os.path.join(self.test_dir,f"ema_v1_{self.iteration}.png"), nrow=4)
+                save_image(pred_v[:16]*0.5+0.5,os.path.join(self.test_dir,f"pred_v_{self.iteration}.png"), nrow=4)
+                save_image(gt_v[:16]*0.5+0.5,os.path.join(self.test_dir,f"gt_v_{self.iteration}.png"), nrow=4)
+                save_image(_sample*0.5+0.5,os.path.join(self.test_dir,f"euler16_{self.iteration}.png"), nrow=4)
+        self.iteration +=1
 
         if "vb" in terms:
             terms["loss"] = terms["ori"] + terms["vb"] + terms["prior"] + terms["kd"]
@@ -588,8 +659,7 @@ class KarrasDenoiser:
             model_output = model(c_in * x_t, rescaled_t, **model_kwargs)
             denoised = c_out * model_output + c_skip * x_t
             return model_output, denoised
-
-
+        
 def karras_sample(
     diffusion,
     model,
@@ -610,6 +680,7 @@ def karras_sample(
     s_noise=1.0,
     generator=None,
     ts=None,
+    estimate_velocity=False,
 ):
     if generator is None:
         generator = get_generator("dummy")
@@ -618,7 +689,6 @@ def karras_sample(
         sigmas = get_sigmas_karras(steps + 1, sigma_min, sigma_max, rho, device=device)
     else:
         sigmas = get_sigmas_karras(steps, sigma_min, sigma_max, rho, device=device)
-
     x_T = generator.randn(*shape, device=device) * sigma_max
 
     sample_fn = {
@@ -642,8 +712,11 @@ def karras_sample(
     else:
         sampler_args = {}
 
-    def denoiser(x_t, sigma):
+    def denoiser(x_t, sigma, x_0=None):
         _, denoised = diffusion.denoise(model, x_t, sigma, **model_kwargs)
+        if estimate_velocity:
+            dims = x_t.ndim
+            denoised = (x_t + denoised) / append_dims(1+sigma, dims) - denoised
         if clip_denoised:
             denoised = denoised.clamp(-1, 1)
         return denoised
@@ -693,9 +766,9 @@ def sample_euler_ancestral(model, x, sigmas, generator, progress=False, callback
         from tqdm.auto import tqdm
 
         indices = tqdm(indices)
-
+    denoised = None
     for i in indices:
-        denoised = model(x, sigmas[i] * s_in)
+        denoised = model(x, sigmas[i] * s_in, denoised)
         sigma_down, sigma_up = get_ancestral_step(sigmas[i], sigmas[i + 1])
         if callback is not None:
             callback(
@@ -755,6 +828,7 @@ def sample_heun(
 
         indices = tqdm(indices)
 
+    denoised = None
     for i in indices:
         gamma = (
             min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
@@ -765,7 +839,7 @@ def sample_heun(
         sigma_hat = sigmas[i] * (gamma + 1)
         if gamma > 0:
             x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
-        denoised = denoiser(x, sigma_hat * s_in)
+        denoised = denoiser(x, sigma_hat * s_in, denoised)
         d = to_d(x, sigma_hat, denoised)
         if callback is not None:
             callback(
@@ -784,8 +858,9 @@ def sample_heun(
         else:
             # Heun's method
             x_2 = x + d * dt
-            denoised_2 = denoiser(x_2, sigmas[i + 1] * s_in)
+            denoised_2 = denoiser(x_2, sigmas[i + 1] * s_in,denoised)
             d_2 = to_d(x_2, sigmas[i + 1], denoised_2)
+            denoised = denoised_2
             d_prime = (d + d_2) / 2
             x = x + d_prime * dt
     return x
@@ -808,9 +883,11 @@ def sample_euler(
 
         indices = tqdm(indices)
 
+    denoised = None
     for i in indices:
         sigma = sigmas[i]
-        denoised = denoiser(x, sigma * s_in)
+        denoised = denoiser(x, sigma * s_in,denoised)
+        save_image(denoised*0.5+0.5,os.path.join("./test",f"trajs_{i}.png"), nrow=4)
         d = to_d(x, sigma, denoised)
         if callback is not None:
             callback(
@@ -847,6 +924,7 @@ def sample_dpm(
 
         indices = tqdm(indices)
 
+    denoised = None
     for i in indices:
         gamma = (
             min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
@@ -857,7 +935,7 @@ def sample_dpm(
         sigma_hat = sigmas[i] * (gamma + 1)
         if gamma > 0:
             x = x + eps * (sigma_hat**2 - sigmas[i] ** 2) ** 0.5
-        denoised = denoiser(x, sigma_hat * s_in)
+        denoised = denoiser(x, sigma_hat * s_in,denoised)
         d = to_d(x, sigma_hat, denoised)
         if callback is not None:
             callback(
@@ -874,8 +952,9 @@ def sample_dpm(
         dt_1 = sigma_mid - sigma_hat
         dt_2 = sigmas[i + 1] - sigma_hat
         x_2 = x + d * dt_1
-        denoised_2 = denoiser(x_2, sigma_mid * s_in)
+        denoised_2 = denoiser(x_2, sigma_mid * s_in,denoised)
         d_2 = to_d(x_2, sigma_mid, denoised_2)
+        denoised = denoised_2
         x = x + d_2 * dt_2
     return x
 
@@ -1212,11 +1291,11 @@ def rectified_sample(
         "heun": sample_heun_rect,
         "euler": sample_euler_rect,
         "onestep":sample_onestep_rect,
-        "rk45":sample_rk45_rect
+        "rk45":sample_rk45_rect,
+        "dpm_solver_2":sample_dpmsolver2_rect
     }[sampler]
 
     sampler_args = dict(N=steps,clip_denoised=clip_denoised)
-    print(sampler_args)
     def denoiser(x_t, t):
         denoised = model(x_t, t, return_features=True, **model_kwargs)
         if isinstance(denoised,tuple) or isinstance(denoised,list):
@@ -1227,10 +1306,9 @@ def rectified_sample(
         denoiser,
         x_T,
         steps,
-        generator,
         **sampler_args,
     )
-    return x_0,noise,x0hat_list
+    return x_0,noise, x0hat_list
 
 
 @th.no_grad()
@@ -1238,33 +1316,86 @@ def sample_euler_rect(
     denoiser,
     x,
     ts,
-    generator,
     N,
     clip_denoised=True,
 ):
     indices = reversed(range(1,ts+1))
     from tqdm.auto import tqdm
     indices = tqdm(indices)
-    dt = -1./N
     traj = [] # to store the trajectory
     x0hat_list = []
     x = x.detach().clone()
     z = x.detach().clone()
     batchsize = x.shape[0]
     traj.append(x.detach().clone())
-
+    sigmas_min = 0
+    sigmas_max = 1.0
+    rho = 1
+    sigmas = (sigmas_min**(1/rho) + th.linspace(0,1,N+1)*(sigmas_max**(1/rho) - sigmas_min**(1/rho)))**(rho)
+    sigmas = sigmas.tolist()
+    sigmas = sigmas # N+1
     for i in indices:
-        t = th.ones((batchsize,1), device=x.device) * i / N
+        t = th.ones((batchsize,1), device=x.device) * sigmas[i]
         d = denoiser(x,t.squeeze())
         x0hat = x - d * t.view(-1,1,1,1)
         zhat = (d+x0hat)
         if clip_denoised:
             x0hat = x0hat.clamp(-1, 1)
         d = zhat - x0hat
+        dt = -(sigmas[i] - sigmas[i-1])
         x = x + d * dt
         x0hat_list.append(x0hat)
         traj.append(x.detach().clone())
-    return x.clamp(-1,1),x0hat_list,traj
+    return x.clamp(-1,1), x0hat_list, traj
+
+@th.no_grad()
+def sample_dpmsolver2_rect(
+    denoiser,
+    x,
+    ts,
+    N,
+    clip_denoised=True,
+):
+    indices = reversed(range(1,ts))
+    from tqdm.auto import tqdm
+    indices = tqdm(indices)
+    traj = [] # to store the trajectory
+    x0hat_list = []
+    x = x.detach().clone()
+    batchsize = x.shape[0]
+    traj.append(x.detach().clone())
+    sigmas_min = 0
+    sigmas_max = 1.0
+    rho = 1
+    sigmas = (sigmas_min**(1/rho) + th.linspace(0,1,N+1)*(sigmas_max**(1/rho) - sigmas_min**(1/rho)))**(rho)
+    sigmas = sigmas.tolist()
+    sigmas = sigmas # N+1
+    prev_velocity_list = []
+    t_begin = th.ones((batchsize,1), device=x.device) * sigmas[-1]
+    d = denoiser(x,t_begin.squeeze())
+    prev_velocity_list.append(d)
+    dt = -(sigmas[-1] - sigmas[-2])
+    x0hat = x - d * t_begin.view(-1,1,1,1)
+    x = x + dt * d
+    traj.append(x)
+    x0hat_list.append(x0hat)
+
+    for i in indices:
+        t = th.ones((batchsize,1), device=x.device) * sigmas[i]
+        d = denoiser(x,t.squeeze())
+        dt = -(sigmas[i] - sigmas[i-1])
+        x0hat = x - d * t.view(-1,1,1,1)
+        zhat = (d+x0hat)
+        if clip_denoised:
+            x0hat = x0hat.clamp(-1, 1)
+        d = zhat - x0hat
+        prev_velocity_list.append(d)
+        D1 = (prev_velocity_list[-1] - prev_velocity_list[-2])*N
+        x0hat = x - d * t.view(-1,1,1,1) - t.view(-1,1,1,1)* t.view(-1,1,1,1)* D1/2
+        x = x.detach().clone() + d*dt - dt*dt*D1/2
+        x0hat_list.append(x0hat)
+        traj.append(x.detach().clone())
+    return x.clamp(-1,1), x0hat_list, traj
 
 @th.no_grad()
 def sample_rk45_rect(

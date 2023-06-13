@@ -6,11 +6,11 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
-from torch.nn.utils import clip_grad_norm_
-from . import logger
-import torch.distributed as dist
+from torch.nn.utils import clip_grad_value_
 
-INITIAL_LOG_LOSS_SCALE = 20.0
+from . import logger
+
+INITIAL_LOG_LOSS_SCALE = 19.0
 
 
 def convert_module_to_f16(l):
@@ -154,6 +154,7 @@ class MixedPrecisionTrainer:
         use_fp16=False,
         fp16_scale_growth=1e-3,
         initial_lg_loss_scale=INITIAL_LOG_LOSS_SCALE,
+        if_apply_for_forward=False,
     ):
         self.model = model
         self.use_fp16 = use_fp16
@@ -163,7 +164,7 @@ class MixedPrecisionTrainer:
         self.master_params = self.model_params
         self.param_groups_and_shapes = None
         self.lg_loss_scale = initial_lg_loss_scale
-        self.scale = th.cuda.amp.grad_scaler.GradScaler()
+        self.if_apply_for_forward = if_apply_for_forward
         if self.use_fp16:
             self.param_groups_and_shapes = get_param_groups_and_shapes(
                 self.model.named_parameters()
@@ -176,7 +177,8 @@ class MixedPrecisionTrainer:
 
     def backward(self, loss: th.Tensor):
         if self.use_fp16:
-            self.scale(loss).backward()
+            loss_scale = 2**self.lg_loss_scale
+            (loss * loss_scale).backward()
         else:
             loss.backward()
 
@@ -189,14 +191,44 @@ class MixedPrecisionTrainer:
     def _optimize_fp16(self, opt: th.optim.Optimizer):
         logger.logkv_mean("lg_loss_scale", self.lg_loss_scale)
         model_grads_to_master_grads(self.param_groups_and_shapes, self.master_params)
-        self.scale.unscale_(opt)
-        grad_norm, param_norm = self._compute_norms(opt)
+        grad_norm, param_norm, check= self._compute_norms(grad_scale=2**self.lg_loss_scale)
+        if self.lg_loss_scale<18 and self.if_apply_for_forward:
+            self.lg_loss_scale = 20
+        
+        if self.lg_loss_scale<1:
+            self.lg_loss_scale = 20
+        elif self.lg_loss_scale > 30:
+            self.lg_loss_scale = 30
+        if check_overflow(grad_norm) or check:
+            self.lg_loss_scale -= 1
+            logger.log(f"Found NaN, decreased lg_loss_scale to {self.lg_loss_scale}")
+            zero_master_grads(self.master_params)
+            return False
         logger.logkv_mean("grad_norm", grad_norm)
         logger.logkv_mean("param_norm", param_norm)
-        self.scale.step(opt)
-        self.scale.update()
+
+        for p in self.master_params:
+            p.grad.mul_(1.0 / (2**self.lg_loss_scale))
+        clip_grad_value_(self.master_params,100.0)
+        opt.step()
+        with th.no_grad():
+            total_norm = 0
+            total_mean = 0
+            for param in self.master_params:
+                norm = th.sum(param.data ** 2)
+                total_norm+=norm
+                nonan_data = param.data[(~th.isnan(param.data))&(~th.isinf(param.data))]
+                mean = nonan_data.max().item()
+                total_mean += mean
+                param.data = th.where(th.isnan(param.data)|th.isinf(param.data),th.randn_like(param.data)*0.01,param.data)
+            if th.isnan(total_norm):
+                logger.log(f"find nan in params, mean is {total_mean}")
+                import collections
+                opt.state = collections.defaultdict(dict) # Reset state
+                logger.log(f"reset optimizer")
         zero_master_grads(self.master_params)
         master_params_to_model_params(self.param_groups_and_shapes, self.master_params)
+        self.lg_loss_scale += self.fp16_scale_growth
         return True
 
     def _optimize_normal(self, opt: th.optim.Optimizer):
@@ -209,12 +241,16 @@ class MixedPrecisionTrainer:
     def _compute_norms(self, grad_scale=1.0):
         grad_norm = 0.0
         param_norm = 0.0
+        check = False
         for p in self.master_params:
             with th.no_grad():
                 param_norm += th.norm(p, p=2, dtype=th.float32).item() ** 2
                 if p.grad is not None:
-                    grad_norm += th.norm(p.grad, p=2, dtype=th.float32).item() ** 2
-        return np.sqrt(grad_norm) / grad_scale, np.sqrt(param_norm)
+                    gg = th.norm(p.grad, p=2, dtype=th.float32).item() ** 2
+                    if check_overflow(gg):
+                        check = True
+                    grad_norm+=gg
+        return np.sqrt(grad_norm) / grad_scale, np.sqrt(param_norm),check
 
     def master_params_to_state_dict(self, master_params):
         return master_params_to_state_dict(
@@ -226,4 +262,4 @@ class MixedPrecisionTrainer:
 
 
 def check_overflow(value):
-    return (value == float("inf")) or (value == -float("inf")) or (value != value)
+    return (value == float("inf")) or (value == -float("inf")) or (value != value) or (value == float("nan"))

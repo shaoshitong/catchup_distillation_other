@@ -9,85 +9,41 @@ import os
 import numpy as np
 import torch as th
 import torch.distributed as dist
-
 from cm import dist_util, logger
-from cm.script_util import (
-    NUM_CLASSES,
-    model_and_diffusion_defaults,
-    create_model_and_diffusion,
-    add_dict_to_argparser,
-    args_to_dict,
-)
-from cm.random_util import get_generator
 from cm.karras_diffusion import karras_sample, rectified_sample
+from cm.random_util import get_generator
+from cm.script_util import (NUM_CLASSES, add_dict_to_argparser, args_to_dict,
+                            create_model_and_diffusion,
+                            model_and_diffusion_defaults)
 from torchvision.utils import save_image
+
 """
- CUDA_VISIBLE_DEVICES=0 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999432189950708_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
-
-  CUDA_VISIBLE_DEVICES=1 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
-
-   CUDA_VISIBLE_DEVICES=2 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
-
- 
-
- CUDA_VISIBLE_DEVICES=4 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999432189950708_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 4
-
- CUDA_VISIBLE_DEVICES=6 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 8
-
-CUDA_VISIBLE_DEVICES=6 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
-
- CUDA_VISIBLE_DEVICES=7 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler euler \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 32
-
-
  
 CUDA_VISIBLE_DEVICES=0 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler heun \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 7
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-06-07-13-33-42-685241/ema_0.9999432189950708_500000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True --prior_shakedrop True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 16
 
 
+CUDA_VISIBLE_DEVICES=1 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler dpm_solver_2 \
+ --model_path /tmp/openai-2023-06-07-13-33-42-685241/ema_0.9999432189950708_500000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True --prior_shakedrop True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 6
+
+ 
+CUDA_VISIBLE_DEVICES=2 mpiexec --allow-run-as-root -n 1 python image_sample.py \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-06-07-13-33-42-685241/ema_0.9999432189950708_500000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True --prior_shakedrop True \
+ --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 8
 
 CUDA_VISIBLE_DEVICES=3 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler heun \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.9999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
+ --batch_size 256 --training_mode catchingup_distillation --sampler euler \
+ --model_path /tmp/openai-2023-06-07-13-33-42-685241/ema_0.9999432189950708_500000.pt  --attention_resolutions 32,16,8 \
+ --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True --prior_shakedrop True \
  --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 4
-
-CUDA_VISIBLE_DEVICES=7 mpiexec --allow-run-as-root -n 1 python image_sample.py \
- --batch_size 256 --training_mode catchingup_distillation --sampler heun \
- --model_path /tmp/openai-2023-05-14-21-11-44-954009/ema_0.999_166000.pt  --attention_resolutions 32,16,8 \
- --class_cond True --use_scale_shift_norm True --dropout 0.0 --image_size 64 --num_channels 192 --save_z True \
- --num_head_channels 64 --num_res_blocks 3 --num_samples 50000  --resblock_updown True --use_fp16 True --weight_schedule uniform --steps 4
-
 """
 def main():
     args = create_argparser().parse_args()
@@ -96,19 +52,28 @@ def main():
     logger.configure()
 
     catchingup = False
-    if "consistency" in args.training_mode:
+    karra = False
+    if args.training_mode == "progdist":
+        distillation = False
+    elif "consistency" in args.training_mode:
         distillation = True
     elif "catchingup" in args.training_mode:
         catchingup = True
         distillation = True
+        if "karra" in args.training_mode:
+            karra = True
+        else:
+            karra = False
     else:
-        distillation = False
+        raise ValueError(f"unknown training mode {args.training_mode}")
+    
     logger.log("creating model and diffusion...")
     model_and_diffusion_kwargs = args_to_dict(
         args, model_and_diffusion_defaults().keys()
     )
     model_and_diffusion_kwargs["distillation"] = distillation
     model_and_diffusion_kwargs["catchingup"] = catchingup
+    model_and_diffusion_kwargs["karra"] = karra
     model, diffusion = create_model_and_diffusion(**model_and_diffusion_kwargs)
     model.load_state_dict(
         dist_util.load_state_dict(args.model_path, map_location="cpu")
@@ -142,7 +107,8 @@ def main():
             )
             model_kwargs["y"] = classes
 
-        if catchingup:
+        if catchingup and not karra:
+            print("clip_denoised",args.clip_denoised)
             sample, noise, x0hat_list = rectified_sample(
                 model,
                 (args.batch_size, 3, args.image_size, args.image_size),
@@ -159,6 +125,7 @@ def main():
             #     save_image(x0hat[:64]*0.5+0.5,f"test_4_x0hat_{_ii}.png",nrow=8)
 
         else:
+            print(args)
             sample = karras_sample(
                 diffusion,
                 model,
@@ -176,7 +143,9 @@ def main():
                 s_noise=args.s_noise,
                 generator=generator,
                 ts=ts,
+                estimate_velocity=args.estimate_velocity
             )
+            save_image(sample[:64]*0.5+0.5,"test.png",nrow=8)
         sample = ((sample + 1) * 127.5).clamp(0, 255).to(th.uint8)
         sample = sample.permute(0, 2, 3, 1)
         sample = sample.contiguous()
@@ -192,9 +161,6 @@ def main():
                 dist.all_gather(gather_x0hat, x0hat_list[_])  # gather not supported with NCCL
                 all_x0hat_images[_].extend([x0hat.cpu().numpy() for x0hat in gather_x0hat])
 
-        # gathered_samples = [th.zeros_like(sample) for _ in range(dist.get_world_size())]
-        # dist.all_gather(gathered_samples, sample)  # gather not supported with NCCL
-        # all_images.extend([sample.cpu().numpy() for sample in gathered_samples])
         all_images.extend([sample.cpu().numpy()])
         if args.class_cond:
             gathered_labels = [
@@ -256,8 +222,10 @@ def create_argparser():
         steps=40,
         model_path="",
         save_z=False,
+        prior_shakedrop=False,
         seed=42,
         ts="",
+        estimate_velocity=False,
     )
     defaults.update(model_and_diffusion_defaults())
     parser = argparse.ArgumentParser()

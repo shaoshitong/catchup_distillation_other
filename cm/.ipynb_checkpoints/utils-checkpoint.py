@@ -1,11 +1,12 @@
-import torch
-import numpy as np
-from torch.distributions import Normal, Categorical
-from torch.distributions.multivariate_normal import MultivariateNormal
-from torch.distributions.mixture_same_family import MixtureSameFamily
-import matplotlib.pyplot as plt
-import torch.nn.functional as F
 import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.distributions import Categorical, Normal
+from torch.distributions.mixture_same_family import MixtureSameFamily
+from torch.distributions.multivariate_normal import MultivariateNormal
 
 
 def get_train_data(COMP, D, VAR):
@@ -212,6 +213,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
+
 class LPIPS(nn.Module):
     def __init__(self):
         super(LPIPS, self).__init__()
@@ -224,8 +226,10 @@ class LPIPS(nn.Module):
         y = self.net(y)
         return torch.mean(torch.square(x - y))
     
-from PIL import Image
 from numpy import random
+from PIL import Image
+
+
 def merge_images(folder_path, output_path, n, m):
     image_files = [f for f in os.listdir(folder_path) if f.endswith('.jpg') or f.endswith('.png')]
     indices = list(range(len(image_files))) # indices = the number of images in the source data set

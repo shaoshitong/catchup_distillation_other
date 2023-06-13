@@ -1,8 +1,12 @@
-import torch,random
-from tqdm import tqdm
-from .utils import alpha, dalpha_dt, d_1_minus_alpha_sq_dt,RK
-from scipy import integrate
 import functools
+import random
+
+import torch
+from scipy import integrate
+from tqdm import tqdm
+
+from .utils import RK, alpha, d_1_minus_alpha_sq_dt, dalpha_dt
+
 
 class BaseFlow():
   def __init__(self, device, model=None, ema_model=None, num_steps=1000):

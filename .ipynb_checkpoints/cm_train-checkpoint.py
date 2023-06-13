@@ -3,23 +3,18 @@ Train a diffusion model on images.
 """
 
 import argparse
+import copy
 
+import torch.distributed as dist
 from cm import dist_util, logger
 from cm.image_datasets import load_data
 from cm.resample import create_named_schedule_sampler
-from cm.script_util import (
-    model_and_diffusion_defaults,
-    forward_model_defaults,
-    create_model_and_diffusion,
-    create_forward_model,
-    cm_train_defaults,
-    args_to_dict,
-    add_dict_to_argparser,
-    create_ema_and_scales_fn,
-)
+from cm.script_util import (add_dict_to_argparser, args_to_dict,
+                            cm_train_defaults, create_ema_and_scales_fn,
+                            create_forward_model, create_model_and_diffusion,
+                            forward_model_defaults,
+                            model_and_diffusion_defaults)
 from cm.train_util import CMTrainLoop
-import torch.distributed as dist
-import copy
 
 """
 mpiexec -n 8 python cm_train.py --training_mode consistency_distillation --target_ema_mode fixed \

@@ -1,6 +1,9 @@
-from PIL import Image
 import os
+
 from numpy import random
+from PIL import Image
+
+
 def merge_images(folder_path, output_path, n, m):
     image_files = [f for f in os.listdir(folder_path) if f.endswith('.jpg') or f.endswith('.png')]
     indices = list(range(len(image_files))) # indices = the number of images in the source data set
@@ -13,14 +16,11 @@ def merge_images(folder_path, output_path, n, m):
 
     images = [Image.open(os.path.join(folder_path, img_file)) for img_file in image_files]
 
-    # 获取最大宽度和高度
     max_width = max([img.width for img in images])
     max_height = max([img.height for img in images])
 
-    # 创建一个空白图片作为拼接结果
     result = Image.new('RGB', ((max_width+2) * n, (max_height+2) * m))
 
-    # 按行列拼接图片
     for i in range(m):
         for j in range(n):
             index = i * n + j
@@ -28,8 +28,7 @@ def merge_images(folder_path, output_path, n, m):
                 img = images[index]
                 result.paste(img, (j * (max_width+2), i * (max_height+2)))
 
-    # 保存拼接后的图片
     result.save(output_path)
 
 if __name__ == "__main__":
-    merge_images("./images", "./rk45.jpg", 18, 6)
+    merge_images("./images", "./euler_16.png", 36, 12)

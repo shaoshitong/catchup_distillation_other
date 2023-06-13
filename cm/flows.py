@@ -1,8 +1,11 @@
-import torch,random
-from tqdm import tqdm
-from .utils import alpha, dalpha_dt, d_1_minus_alpha_sq_dt,RK
-from scipy import integrate
 import functools
+import random
+
+import torch
+from scipy import integrate
+from tqdm import tqdm
+from utils import alpha, d_1_minus_alpha_sq_dt, dalpha_dt
+
 
 class BaseFlow():
   def __init__(self, device, model=None, ema_model=None, num_steps=1000):
@@ -190,154 +193,6 @@ class NonlinearFlow(BaseFlow):
 
       return traj
     
-class ResidualFlow(RectifiedFlow):
-  def __init__(self, device, model_list=None, num_steps=1000):
-    self.model_list = model_list
-    self.model = model_list[-1]
-    self.N = num_steps
-    self.device = device
-
-  def get_train_tuple(self, z0=None, z1=None, t = None, N=2):
-    if t is None:
-      t = torch.randint(0,self.N+1,(z1.shape[0],1),device=self.device).float()/self.N
-    z1 = self.sample_residual_ode(z1=z1,N=N)
-    if len(z1.shape) == 2:
-      z_t =  t * z1 + (1.-t) * z0
-    elif len(z1.shape) == 4:
-      t = t.view(-1, 1, 1, 1)
-      z_t =  t * z1 + (1.-t) * z0
-    else:
-      raise NotImplementedError(f"get_train_tuple not implemented for {self.__class__.__name__}.")
-    target = z1 - z0 
-    return z_t, t, target
-  
-  def get_eval_dis(self, z0=None, z1=None, t = None, res_number = -1 ,N=2):
-    if t is None:
-      t = torch.randint(0,self.N+1,(z1.shape[0],1),device=self.device).float()/self.N
-    if res_number == -1:
-      z1 = self.sample_residual_ode(z1=z1,N=N)
-    else:
-      tq = lambda x: x
-      if N is None:
-        N = self.N    
-      dt = -1./ N
-      z = z1.detach().clone()
-      batchsize = z.shape[0]
-      for i in range(res_number):
-        for j in tq(reversed(range(1,N+1))):
-          s_t = torch.ones((batchsize,1), device=self.device) * j / N
-          if len(z1.shape) == 2:
-            vt = self.model_list[i](z, s_t)
-          elif len(z1.shape) == 4:
-            vt = self.model_list[i](z, s_t.squeeze())
-          z = z.detach().clone() + vt * dt
-      z1 = z
-    if len(z1.shape) == 2:
-      z_t =  t * z1 + (1.-t) * z0
-    elif len(z1.shape) == 4:
-      z_t =  t.view(-1, 1, 1, 1) * z1 + (1.-t.view(-1, 1, 1, 1)) * z0
-    else:
-      raise NotImplementedError(f"get_train_tuple not implemented for {self.__class__.__name__}.")
-    target = z1 - z0
-    if res_number!=-1:
-      pred = self.model_list[res_number](z_t,t)
-    else:
-      pred = self.model_list[-1](z_t,t)
-    return pred - target
-  
-  @torch.no_grad()
-  def sample_ode(self, z0=None, N=None):
-    if N == None:
-      N = self.N
-    traj = [] # to store the trajectory
-    z = z0.detach().clone()
-    batchsize = z.shape[0]
-    traj.append(z.detach().clone())
-    for i in reversed(range(len(self.model_list))):
-      dt = 1./N
-      for j in range(N):
-        t = torch.ones((batchsize,1), device=self.device)* j / N
-        if len(z0.shape) == 2:
-          pred = self.model_list[i](z, t)
-        elif len(z0.shape) == 4:
-          pred = self.model_list[i](z, t.squeeze())
-        z = z.detach().clone() + pred * dt
-        traj.append(z.detach().clone())
-    return traj
-  
-  @torch.no_grad()
-  def sample_ode_generative(self, z1=None, N=None, use_tqdm=True, solver = 'euler'):
-    assert solver in ['euler', 'heun','dpm_solver']
-    tq = tqdm if use_tqdm else lambda x: x
-    if N is None:
-      N = self.N    
-    if solver == 'heun' and N % 2 == 0:
-      raise ValueError("N must be odd when using Heun's method.")
-    if solver == 'heun':
-      N = (N + 1) // 2
-    dt = -1./ N
-    traj = [] # to store the trajectory
-    x0hat_list = []
-    z = z1.detach().clone()
-    batchsize = z.shape[0]
-    traj.append(z.detach().clone())
-    for i in range(len(self.model_list)):
-      for j in tq(reversed(range(1,N+1))):
-        t = torch.ones((batchsize,1), device=self.device) * j / N
-        t_next = torch.ones((batchsize,1), device=self.device) * (j-1) / N
-        if len(z1.shape) == 2:
-          if solver == 'heun':
-            raise NotImplementedError("Heun's method not implemented for 2D data.")
-          vt = self.model_list[i](z, t)
-        elif len(z1.shape) == 4:
-          vt = self.model_list[i](z, t.squeeze())
-          if solver == 'heun' and j > 1:
-            z_next = z.detach().clone() + vt * dt
-            vt_next = self.model_list[i](z_next, t_next.squeeze())
-            vt = (vt + vt_next) / 2
-          x0hat = z - vt * t.view(-1,1,1,1)
-          x0hat_list.append(x0hat)
-        z = z.detach().clone() + vt * dt
-        traj.append(z.detach().clone())
-    return traj, x0hat_list
-
-  @torch.no_grad()
-  def sample_residual_ode(self, z1=None, N=None,end = -1):
-    tq = lambda x: x
-    if N is None:
-      N = self.N    
-    dt = -1./ N
-    z = z1.detach().clone()
-    batchsize = z.shape[0]
-    if end == -1:
-      end = len(self.model_list)
-    for i in range(end):
-      for j in tq(reversed(range(1,N+1))):
-        t = torch.ones((batchsize,1), device=self.device) * j / N
-        if len(z1.shape) == 2:
-          vt = self.model_list[i](z, t)
-        elif len(z1.shape) == 4:
-          vt = self.model_list[i](z, t.squeeze())
-        z = z.detach().clone() + vt * dt
-    return z
-
-
-  @torch.no_grad()
-  def sample_ode_generative_bbox(self, z1=None, N=None, use_tqdm=True, solver = 'RK45'):
-    dshape = z1.shape
-    device = z1.device
-    check_set = [1,2,4,8,16]
-    assert N in check_set,"N must be one of 1, 2, 4, 8, 16."
-    start = torch.ones(z1.shape[0]).to(z1.device).float()
-    end =  torch.zeros(z1.shape[0]).to(z1.device).float()
-    step = (end - start) / N
-    def ode_func(t, x, i):
-      vec_t = t
-      vt = self.model_list[i](x, vec_t)
-      return vt
-    for i in range(len(self.model_list)):
-      z1 = RK(functools.partial(ode_func,i=i),z1,start,step,N,method=solver)
-    return z1
 
 class ConsistencyFlow(RectifiedFlow):
   def __init__(self, device,model, ema_model,num_steps=1000,TN=16,discrete=False):
@@ -407,22 +262,27 @@ class ProgDistFlow(RectifiedFlow):
 
 
 
-class OnlineSlimFlow(RectifiedFlow):
-  def __init__(self, device, model, ema_model, predstep, num_steps=1000,TN=16,adapt_cu="origin",sam=False):
+class CatchUpFlow(RectifiedFlow):
+  def __init__(self, device, model, ema_model, generator_list=None, num_steps=1000,TN=16,adapt_cu="origin",add_prior_z=False,discrete=False):
     self.ema_model = ema_model
     self.model = model
-    self.sam = sam
     self.N = num_steps
     assert adapt_cu in ["origin","rule","uniform"],"adapt_cu must be one of 'origin','rule','uniform'."
     self.adapt_cu = adapt_cu
-    self.add_prior_z = False
-    self.discrete = False
+    self.add_prior_z = add_prior_z
+    self.discrete = discrete
     self.TN = TN
     self.device = device
-    self.cu_number = self.predstep = predstep
+    if generator_list == None:
+      self.cu_number = 1
+    else:
+      assert isinstance(generator_list,list)
+      self.cu_number = len(generator_list) + 1
+    self.generator_list = generator_list # include [g2,g3]
 
 
   def get_train_tuple_one_step(self, z0=None, z1=None, t = None,eps=1e-5):
+    ori_z = z1 if self.add_prior_z else None
     if t is None:
       if self.discrete:
         t = torch.randint(1,self.TN+1,(z0.shape[0],)).to(z1.device).float()/self.TN
@@ -430,7 +290,6 @@ class OnlineSlimFlow(RectifiedFlow):
         t = torch.rand((z0.shape[0],)).to(z1.device).float()
         t = t*(1-eps)+eps
     
-    t = t.type_as(z0)
     if self.discrete:
       if self.adapt_cu=="uniform":
           dt = (torch.rand((z0.shape[0],)).to(z1.device).float() * t *self.TN).int().float()/self.TN
@@ -453,19 +312,19 @@ class OnlineSlimFlow(RectifiedFlow):
       t = t.view(-1)
     else:
       raise NotImplementedError(f"z1.shape should be 2 or 4.")
-
+    
     ############################################## Train Model Prediction ###############################################
-    pred_z_t = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t)
+    pred_z_t = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,ori_z=ori_z)
 
     ############################################## EMA Model Prediction #################################################
     with torch.no_grad():
-      now_z_t = pre_z_t - dt.view(dt.shape[0],1,1,1)*self.model(pre_z_t,(t*self.TN).int() if self.discrete else t)
+      now_z_t = pre_z_t - dt.view(dt.shape[0],1,1,1)*self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,ori_z=ori_z)
       now_t = t - dt
       if self.discrete:
         now_t = now_t.clamp(1/self.TN,1)
       else:
         now_t = now_t.clamp(eps,1)
-      ema_z_t = self.model(now_z_t,(now_t*self.TN).int() if self.discrete else now_t)
+      ema_z_t = self.model(now_z_t,(now_t*self.TN).int() if self.discrete else now_t,ori_z=ori_z)
       ema_z_t[~mask] = (z1-z0)[~mask]
     ############################################## Ground Truth #########################################################
     gt_z_t = z1 - z0
@@ -474,6 +333,7 @@ class OnlineSlimFlow(RectifiedFlow):
 
 
   def get_train_tuple_two_step(self, z0 = None, z1 = None, t = None,eps = 1e-5):
+    ori_z = z1 if self.add_prior_z else None
     if t is None:
       if self.discrete:
         t = torch.randint(1,self.TN+1,(z0.shape[0],)).to(z1.device).float()/self.TN
@@ -503,18 +363,19 @@ class OnlineSlimFlow(RectifiedFlow):
       raise NotImplementedError(f"z1.shape should be 2 or 4.")
     
     ############################################## Train Model Prediction ###############################################
-    pred_1_z_t,pred_2_z_t = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,return_features=True)
+    pred_1_z_t,features = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,return_features=True,ori_z=ori_z)
+    pred_2_z_t = self.generator_list[0](features)
     pred_list = [pred_1_z_t,pred_2_z_t]
 
     ############################################## EMA Model Prediction #################################################
     with torch.no_grad():
       h = dt.view(dt.shape[0],1,1,1)
-      k1 = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t)
-      k2 = self.model(pre_z_t-h*k1,(t*self.TN-1).int() if self.discrete else t-dt)
+      k1 = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,ori_z=ori_z)
+      k2 = self.model(pre_z_t-h*k1,(t*self.TN-1).int() if self.discrete else t-dt,ori_z=ori_z)
       ema_1_z_t = pre_z_t - h*((1/2)*k1+(1/2)*k2)
       ema_2_z_t = pre_z_t - h*(k1+k2)
-      ema_1_z_t = self.model(ema_1_z_t,(t*self.TN-1).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-dt,eps,1))
-      ema_2_z_t = self.model(ema_2_z_t,(t*self.TN-2).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-2*dt,eps,1))
+      ema_1_z_t = self.model(ema_1_z_t,(t*self.TN-1).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-dt,eps,1),ori_z=ori_z)
+      ema_2_z_t = self.model(ema_2_z_t,(t*self.TN-2).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-2*dt,eps,1),ori_z=ori_z)
       ema_1_z_t[~mask] = (z1-z0)[~mask]
       ema_2_z_t[~mask] = (z1-z0)[~mask]
       ema_list = [ema_1_z_t,ema_2_z_t]
@@ -524,6 +385,7 @@ class OnlineSlimFlow(RectifiedFlow):
     return pred_list, ema_list, gt_z_t
   
   def get_train_tuple_three_step(self, z0=None, z1=None, t = None,eps=1e-5):
+      ori_z = z1 if self.add_prior_z else None
       if t is None:
         if self.discrete:
           t = torch.randint(1,self.TN+1,(z0.shape[0],)).to(z1.device).float()/self.TN
@@ -552,21 +414,23 @@ class OnlineSlimFlow(RectifiedFlow):
       else:
         raise NotImplementedError(f"z1.shape should be 2 or 4.")
       ############################################## Train Model Prediction ###############################################
-      pred_1_z_t,pred_2_z_t,pred_3_z_t= self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,return_features=True)
+      pred_1_z_t,features = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,return_features=True,ori_z=ori_z)
+      pred_2_z_t = self.generator_list[0](features)
+      pred_3_z_t = self.generator_list[1](features)
       pred_list = [pred_1_z_t,pred_2_z_t,pred_3_z_t]
 
       ############################################## EMA Model Prediction #################################################
       with torch.no_grad():
         h = dt.view(dt.shape[0],1,1,1)
-        k1 = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t)
-        k2 = self.model(pre_z_t-h*k1,(t*self.TN-1).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-dt,eps,1))
-        k3 = self.model(pre_z_t-(7*h*k1/4+1*h*k2/4),(t*self.TN-2).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-2*dt,eps,1))
+        k1 = self.model(pre_z_t,(t*self.TN).int() if self.discrete else t,ori_z=ori_z)
+        k2 = self.model(pre_z_t-h*k1,(t*self.TN-1).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-dt,eps,1),ori_z=ori_z)
+        k3 = self.model(pre_z_t-(7*h*k1/4+1*h*k2/4),(t*self.TN-2).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-2*dt,eps,1),ori_z=ori_z)
         ema_1_z_t = pre_z_t - h*((5/12)*k1+(2/3)*k2-(1/12)*k3)
         ema_2_z_t = pre_z_t - 2*h*((5/12)*k1+(2/3)*k2-(1/12)*k3)
         ema_3_z_t = pre_z_t - 3*h*((5/12)*k1+(2/3)*k2-(1/12)*k3)
-        ema_1_z_t = self.model(ema_1_z_t,(t*self.TN-1).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-1*dt,eps,1))
-        ema_2_z_t = self.model(ema_2_z_t,(t*self.TN-2).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-2*dt,eps,1))
-        ema_3_z_t = self.model(ema_3_z_t,(t*self.TN-3).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-3*dt,eps,1))
+        ema_1_z_t = self.model(ema_1_z_t,(t*self.TN-1).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-1*dt,eps,1),ori_z=ori_z)
+        ema_2_z_t = self.model(ema_2_z_t,(t*self.TN-2).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-2*dt,eps,1),ori_z=ori_z)
+        ema_3_z_t = self.model(ema_3_z_t,(t*self.TN-3).int().clamp(1,self.TN) if self.discrete else torch.clamp(t-3*dt,eps,1),ori_z=ori_z)
         ema_1_z_t[~mask] = (z1-z0)[~mask]
         ema_2_z_t[~mask] = (z1-z0)[~mask]
         ema_3_z_t[~mask] = (z1-z0)[~mask]
@@ -580,9 +444,6 @@ class OnlineSlimFlow(RectifiedFlow):
 
 
   def get_train_tuple(self, z0=None, z1=None, t=None, eps=0.00001,pred_step=1):
-    if self.sam:
-        raise NotImplementedError(f"get_train_tuple not implemented for {self.__class__.__name__}.")
-    else:
       if pred_step==1:
         return self.get_train_tuple_one_step(z0,z1,t,eps)
       elif pred_step==2:
@@ -613,51 +474,162 @@ class OnlineSlimFlow(RectifiedFlow):
     if generator_id == 1:
       model_fn = lambda z,t: self.model(z,t)
     else:
-      model_fn = lambda z,t: self.model(z,t,return_features=True)[generator_id-1]
-    assert solver in ['euler', 'heun']
+      model_fn = lambda z,t: self.generator_list[generator_id-2](self.model(z,t,return_features=True)[1])
+    assert solver in ['euler', 'heun', 'dpm_solver_2', 'dpm_solver_3',"deis_2","deis_3"]
     tq = tqdm if use_tqdm else lambda x: x
     if N is None:
-      N = self.N    
-    if solver == 'heun' and N % 2 == 0:
-      raise ValueError("N must be odd when using Heun's method.")
-    if solver == 'heun':
-      N = (N + 1) // 2
+      N = self.N
     dt = -1./N
-    traj = [] # to store the trajectory
-    x0hat_list = []
-    z = z1.detach().clone()
-    batchsize = z.shape[0]
-    vt = 0.
-    traj.append(z.detach().clone())
-    for i in tq(reversed(range(1,N+1))):
-      t = torch.ones((batchsize,1), device=self.device) * i / N
-      t_next = torch.ones((batchsize,1), device=self.device) * (i-1) / N
-      if len(z1.shape) == 2:
-        if solver == 'heun':
-          raise NotImplementedError("Heun's method not implemented for 2D data.")
-        _vt = model_fn(z, t)
-      elif len(z1.shape) == 4:
-        _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
-        if solver == 'heun':
-          if i!=1:
-            z_next = z.detach().clone() + _vt * dt
-            vt_next = model_fn(z_next, (t_next*self.TN).int().squeeze() if self.discrete else t_next.squeeze())
-            _vt = (_vt + vt_next) / 2
-        if i==N:
-          vt = _vt.detach().clone()
-        else:
-          vt = _vt.detach().clone() *(1-momentum) + momentum * vt
-        x0hat = z - vt * t.view(-1,1,1,1)
-        x0hat_list.append(x0hat)
-      
-      z = z.detach().clone() + vt * dt
-      
+    if solver in  ['euler', 'heun']:
+      if solver == 'heun' and N % 2 == 0:
+        raise ValueError("N must be odd when using Heun's method.")
+      if solver == 'heun':
+        N = (N + 1) // 2
+      traj = [] # to store the trajectory
+      x0hat_list = []
+      z = z1.detach().clone()
+      batchsize = z.shape[0]
+      vt = 0.
       traj.append(z.detach().clone())
-    return traj, x0hat_list
-  
+      for i in tq(reversed(range(1,N+1))):
+        t = torch.ones((batchsize,1), device=self.device) * i / N
+        t_next = torch.ones((batchsize,1), device=self.device) * (i-1) / N
+        if len(z1.shape) == 2:
+          if solver == 'heun':
+            raise NotImplementedError("Heun's method not implemented for 2D data.")
+          _vt = model_fn(z, t)
+        elif len(z1.shape) == 4:
+          _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+          if solver == 'heun':
+            if i!=1:
+              z_next = z.detach().clone() + _vt * dt
+              vt_next = model_fn(z_next, (t_next*self.TN).int().squeeze() if self.discrete else t_next.squeeze())
+              _vt = (_vt + vt_next) / 2
+          if i==N:
+            vt = _vt.detach().clone()
+          else:
+            vt = _vt.detach().clone() *(1-momentum) + momentum * vt
+          x0hat = z - vt * t.view(-1,1,1,1)
+          x0hat_list.append(x0hat)
+        
+        z = z.detach().clone() + vt * dt
+        
+        traj.append(z.detach().clone())
+      return traj, x0hat_list
+    else:
+      prev_velocity_list = []
+      prev_t_list = []
+      traj = [] # to store the trajectory
+      x0hat_list = []
+      if solver == "dpm_solver_2":
+        assert N>=2,"In DPM-Solver-2, N must > 2"
+        t_begin = torch.ones((batchsize,1), device=self.device)
+        _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+        prev_velocity_list.append(_vt)
+        prev_t_list.append(t_begin)
+        z = z.detach().clone() + _vt*dt
+        traj.append(z.detach().clone())
+        x0hat = z - _vt * t.view(-1,1,1,1)
+        x0hat_list.append(x0hat)
+
+        for i in tq(reversed(range(1,N))):
+            t = torch.ones((batchsize,1), device=self.device) * i / N
+            _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+            prev_velocity_list.append(_vt)
+            prev_t_list.append(t)
+            del prev_velocity_list[0]
+            del prev_t_list[0]
+            D1 = (prev_velocity_list[-1] - prev_velocity_list[-2])*N
+            z = z.detach().clone() + _vt*dt - dt*dt*D1/2
+            traj.append(z.detach().clone())
+            x0hat = z - _vt * t.view(-1,1,1,1) - t.view(-1,1,1,1)* t.view(-1,1,1,1)* D1/2
+            x0hat_list.append(x0hat)
+        return traj, x0hat_list
+      elif solver == "dpm_solver_3":
+        assert N>=3,"In DPM-Solver-3, N must > 3"
+        t_begin = torch.ones((batchsize,1), device=self.device)
+        _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+        prev_velocity_list.append(_vt)
+        prev_t_list.append(t_begin)
+        z = z.detach().clone() + _vt*dt
+        traj.append(z.detach().clone())
+        x0hat = z - _vt * t.view(-1,1,1,1)
+        x0hat_list.append(x0hat)
+
+        t_next = torch.ones((batchsize,1), device=self.device) * (N-1)/N
+        _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+        prev_velocity_list.append(_vt)
+        prev_t_list.append(t_next)
+        z = z.detach().clone() + _vt*dt - dt*(prev_velocity_list[-1]-prev_velocity_list[-2])/2
+        traj.append(z.detach().clone())
+        x0hat = z - _vt * t.view(-1,1,1,1) - t*t*N*(prev_velocity_list[-1]-prev_velocity_list[-2])/2
+        x0hat_list.append(x0hat)
+
+        for i in tq(reversed(range(1,N-1))):
+            t = torch.ones((batchsize,1), device=self.device) * i / N
+            _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+            prev_velocity_list.append(_vt)
+            prev_t_list.append(t)
+            del prev_velocity_list[0]
+            del prev_t_list[0]
+            D1_0 = N*(prev_velocity_list[-1] - prev_velocity_list[-2])
+            D1_1 = N*(prev_velocity_list[-2] - prev_velocity_list[-3])
+            D2 = N * (D1_0 - D1_1) / 2
+            D1 = D1_0 + D2 / (2*N)
+            z = z.detach().clone() + _vt*dt - dt*dt*D1/2 + dt*dt*dt*D2/6
+            traj.append(z.detach().clone())
+            x0hat = z - _vt * t.view(-1,1,1,1) - t.view(-1,1,1,1)* t.view(-1,1,1,1)* D1/2 + t.view(-1,1,1,1)*t.view(-1,1,1,1)*t.view(-1,1,1,1)*D2/6 
+            x0hat_list.append(x0hat)
+        return traj, x0hat_list
+      elif solver == "deis_2":
+        assert N>=2,"In DEIS-2, N must > 2"
+        t_begin = torch.ones((batchsize,1), device=self.device)
+        _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+        prev_velocity_list.append(_vt)
+        prev_t_list.append(t_begin)
+        z = z.detach().clone() + _vt*dt
+        traj.append(z.detach().clone())
+        x0hat = z - _vt * t.view(-1,1,1,1)
+        x0hat_list.append(x0hat) # First Appling Euler
+
+        def ploynomial(pred_v_list,pred_t_list,cur_t,order):
+          using_pred_t_list = torch.Tensor(pred_t_list[-order:])
+          using_pred_v_list = torch.Tensor(pred_v_list[-order:])
+          sub_pred_t_list = using_pred_t_list[...,None] - using_pred_t_list[None,...]
+          sub_pred_t_list = torch.where(sub_pred_t_list==0,1,sub_pred_t_list)
+          desum = torch.prod(sub_pred_t_list,1)
+          sub_cur_t = cur_t - using_pred_t_list[None,...].expand(order,1)
+          sum = torch.prod(torch.where((torch.eye(cur_t.shape[0]).int() == 1),1,sub_cur_t),1)
+          ploy_result = (sum / desum).view(order,1,1,1,1) * torch.cat([pred_v_list],dim=0)
+          return ploy_result.sum(0)
+
+        def integral(func,start,end,item,pred_v_list,pred_t_list,order):
+          result = 0
+          points = torch.linspace(start,end,(end-start)/item)
+          for i in range(points.shape[0]):
+            result += func(pred_v_list,pred_t_list,points[i],order)
+          result /= item
+          return result
+        
+        for i in tq(reversed(range(1,N-1))):
+            t = torch.ones((batchsize,1), device=self.device) * i / N
+            _vt = model_fn(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+            prev_velocity_list.append(_vt)
+            prev_t_list.append(t)
+            del prev_velocity_list[0]
+            del prev_t_list[0]
+            new_velocity = integral(t+dt,t,1000,prev_velocity_list,prev_t_list,order=2)
+            z = z.detach().clone() + dt * new_velocity
+            traj.append(z.detach().clone())
+            x0hat = z - _vt * t.view(-1,1,1,1) - t.view(-1,1,1,1) * new_velocity
+            x0hat_list.append(x0hat)
+        return traj, x0hat_list
+
+
   @torch.no_grad()
   def sample_ode(self, z0=None, N=None):
     ### NOTE: Use Euler method to sample from the learned flow
+    ori_z = torch.randn_like(z0).to(z0.device) if self.add_prior_z else None
     if N is None:
       N = self.N    
     dt = 1./N
@@ -669,11 +641,10 @@ class OnlineSlimFlow(RectifiedFlow):
     for i in range(N):
       t = torch.ones((batchsize,1), device=self.device) * i / N
       if len(z0.shape) == 2:
-        pred = self.model(z, (t*self.TN).int() if self.discrete else t)
+        pred = self.model(z, (t*self.TN).int() if self.discrete else t ,ori_z=ori_z)
       elif len(z0.shape) == 4:
-        pred = self.model(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze())
+        pred = self.model(z, (t*self.TN).int().squeeze() if self.discrete else t.squeeze(),ori_z=ori_z)
       z = z.detach().clone() + pred * dt
       
       traj.append(z.detach().clone())
     return traj
-  

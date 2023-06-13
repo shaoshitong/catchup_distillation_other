@@ -147,7 +147,7 @@ class Evaluator:
 
     def read_activations_new(self, npz_path: str) -> Tuple[np.ndarray, np.ndarray]:
         with open_npz_array(npz_path, "arr_3") as reader:
-            reader.arr = reader.arr[-3]
+            reader.arr = reader.arr[-1]
             reader.arr = np.clip(((reader.arr + 1) * 127.5),0, 255).astype(np.uint8)
             reader.arr = reader.arr.transpose((0, 2, 3, 1))
             return self.compute_activations(reader.read_batches(self.batch_size))

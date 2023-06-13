@@ -3,22 +3,17 @@ import functools
 import os
 
 import blobfile as bf
+import numpy as np
 import torch as th
 import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import RAdam
 
 from . import dist_util, logger
-from .fp16_util import MixedPrecisionTrainer
+from .fp16_util import (MixedPrecisionTrainer, get_param_groups_and_shapes,
+                        make_master_params, master_params_to_model_params)
 from .nn import update_ema
 from .resample import LossAwareSampler, UniformSampler
-
-from .fp16_util import (
-    get_param_groups_and_shapes,
-    make_master_params,
-    master_params_to_model_params,
-)
-import numpy as np
 
 # For ImageNet experiments, this was a good default value.
 # We found that the lg_loss_scale quickly climbed to
